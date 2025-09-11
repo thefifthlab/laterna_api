@@ -6,7 +6,7 @@ import math
 
 class ProductAPI(http.Controller):
 
-    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cor="*")
+    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False,  cors="*")
     def list_products(self, **kwargs):
         try:
             # Parse query parameters
@@ -65,23 +65,11 @@ class ProductAPI(http.Controller):
                 "pages": total_pages
             }
 
-            # Set CORS headers
-            headers = [
-                ('Content-Type', 'application/json'),
-                ('Access-Control-Allow-Origin', '*'),  # OR restrict to your domain
-                ('Access-Control-Allow-Methods', 'GET, OPTIONS'),
-                ('Access-Control-Allow-Headers', 'Content-Type'),
-            ]
-
-            return Response(json.dumps(response), status=200, headers=headers)
+            return Response(json.dumps(response), status=200, content_type='application/json')
 
         except Exception as e:
             error = {'error': str(e)}
-            headers = [
-                ('Content-Type', 'application/json'),
-                ('Access-Control-Allow-Origin', '*'),
-            ]
-            return Response(json.dumps(error), status=500, headers=headers)
+            return Response(json.dumps(error), status=500, content_type='application/json')
 
     def _get_product_price(self, product, pricelist):
         """Get product price considering pricelist rules"""
@@ -112,6 +100,7 @@ class ProductAPI(http.Controller):
             base_url = request.httprequest.host_url.strip('/')
             return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
         return ''
+
 
     @http.route('/api/v1/products/<int:id>', type='http', auth='public', methods=['GET'], csrf=False)
     def get_product_detail(self, id, **kwargs):
