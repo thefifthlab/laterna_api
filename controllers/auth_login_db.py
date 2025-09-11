@@ -22,7 +22,7 @@ class LoginAuthenticationAPI(http.Controller):
 
         try:
             params = request.httprequest.get_json()
-            required_fields = {'login', 'password'}
+            required_fields = {'login', 'password', 'db'}
 
             if not isinstance(params, dict):
                 _logger.warning(f"[{request_time}] Invalid JSON from IP: {client_ip}")
@@ -36,13 +36,11 @@ class LoginAuthenticationAPI(http.Controller):
             # Sanitize input
             login = str(params['login']).strip().lower()
             password = str(params['password']).strip()
+            db = str(params['db']).strip()
 
-            if not all([login, password]):
+            if not all([login, password, db]):
                 _logger.warning(f"[{request_time}] Empty fields detected from IP: {client_ip}")
                 return Response(json.dumps({'status': 'error', 'message': 'Empty fields are not allowed'}), status=400, content_type='application/json')
-
-            # Get current database
-            db = request.env.cr.dbname
 
             # Authenticate
             credential = {'login': login, 'password': password, 'type': 'password'}

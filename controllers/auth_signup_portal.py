@@ -5,7 +5,9 @@ import logging
 import re
 from werkzeug.wrappers import Response
 
+
 _logger = logging.getLogger(__name__)
+
 
 class LaternaAuthenticationSignUp(http.Controller):
     @http.route('/api/v1/auth/register', type='http', auth='public', methods=['POST'], csrf=False, cors='*')
@@ -59,13 +61,13 @@ class LaternaAuthenticationSignUp(http.Controller):
                 'phone': data.get('phone', False),
             })
 
-            # Create user as internal user
+            # Create user
             user = request.env['res.users'].sudo().with_context(no_reset_password=True).create({
                 'name': data.get('name'),
                 'login': email,
                 'password': password,
                 'partner_id': partner.id,
-                'groups_id': [(6, 0, [request.env.ref('base.group_user').id])]  # Changed to internal user group
+                'groups_id': [(6, 0, [request.env.ref('base.group_portal').id])]
             })
 
             # Send welcome email
@@ -101,3 +103,5 @@ class LaternaAuthenticationSignUp(http.Controller):
             headers=headers,
             status=status
         )
+
+
