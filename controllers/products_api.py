@@ -6,7 +6,7 @@ import math
 
 class ProductAPI(http.Controller):
 
-    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False)
+    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cor="*")
     def list_products(self, **kwargs):
         try:
             # Parse query parameters
