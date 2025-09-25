@@ -188,7 +188,6 @@ class ProductAPI(http.Controller):
                     'name': category.name,
                     'parent_id': category.parent_id.id if category.parent_id else None,
                     'image_url': f"/web/image/product.public.category/{category.id}/image_1920" if category.image_1920 else ''
-                    # 'image_url': category.image_url if hasattr(category, 'image_url') else ''
                 }
                 for category in categories
             ]
@@ -199,28 +198,4 @@ class ProductAPI(http.Controller):
             status=200,
             mimetype='application/json'
         )
-
-    # @http.route('/api/v1/categories/<int:category_id>/subcategories', type='http', auth='public', methods=['GET'],
-    #            cors='*')
-    # def list_subcategories(self, category_id, **kwargs):
-    #     domain = [('parent_id', '=', category_id)]
-    #
-    #     categories = request.env['product.public.category'].sudo().search(domain)
-    #     result = {
-    #         'subcategories': [
-    #             {
-    #                 'id': category.id,
-    #                 'name': category.name,
-    #                 'parent_id': category.parent_id.id if category.parent_id else None,
-    #                 'image_url': category.image_url if hasattr(category, 'image_url') else ''
-    #             }
-    #             for category in categories
-    #         ]
-    #     }
-    #
-    #     return http.Response(
-    #         json.dumps(result),
-    #         status=200,
-    #         mimetype='application/json'
-    #     )
 
