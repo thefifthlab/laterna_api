@@ -2,11 +2,12 @@ from odoo import http
 from odoo.http import request, Response
 import json
 import math
-
+from odoo.exceptions import AccessError, ValidationError  # Import AccessError and ValidationError
+import logging
 
 class ProductAPI(http.Controller):
 
-    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False,  cors="*")
+    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
     def list_products(self, **kwargs):
         try:
             # Parse query parameters
@@ -101,8 +102,7 @@ class ProductAPI(http.Controller):
             return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
         return ''
 
-
-    @http.route('/api/v1/products/<int:id>', type='http', auth='public', methods=['GET'], csrf=False)
+    @http.route('/api/v1/products/<int:id>', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
     def get_product_detail(self, id, **kwargs):
         """Get detailed information for a specific product"""
         if id <= 0:
@@ -198,4 +198,3 @@ class ProductAPI(http.Controller):
             status=200,
             mimetype='application/json'
         )
-

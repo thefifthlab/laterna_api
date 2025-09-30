@@ -15,7 +15,7 @@ _logger = logging.getLogger(__name__)
 
 class LoginAuthenticationAPI(http.Controller):
 
-    @http.route('/api/v1/auth/login', type='json', auth="public", csrf=False, methods=['POST'])
+    @http.route('/api/v1/auth/login', type='json', auth="public", csrf=False, methods=['POST'], cors="*")
     def auth_login(self):
         client_ip = request.httprequest.remote_addr
         request_time = datetime.datetime.now().isoformat()
