@@ -1,3 +1,5 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_laterna_authentication_laterna_authentication,laterna_authentication.laterna_authentication,model_laterna_authentication_laterna_authentication,base.group_user,1,1,1,1
 access_category_public,category.public.access,model_category,,1,0,0,0
+access_product_category_api,product.public.category api,model_product_public_category,base.group_public,1,0,0,0
+access_product_template_api,product.template api,model_product_template,base.group_public,1,0,0,0
