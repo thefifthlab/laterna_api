@@ -105,7 +105,7 @@ class ProductAPI(http.Controller):
             return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
         return ''
 
-    @http.route('/api/v1/products/<int:id>', type='http', auth='public', methods=['GET'], csrf=False)
+    @http.route('/api/v1/products/<int:id>', type='http', auth='public', methods=['GET'], csrf=False, cors='*')
     def get_product_detail(self, id, **kwargs):
         """Get detailed information for a specific product"""
         if id <= 0:
@@ -178,7 +178,7 @@ class ProductAPI(http.Controller):
 
         return request.make_json_response(response)
 
-    @http.route('/api/v1/categories', type='http', auth='public', methods=['GET'], cors='*')
+    @http.route('/api/v1/categories', type='http', auth='public', methods=['GET'], csrf=False, cors='*')
     def list_categories(self, **kwargs):
         """List categories or subcategories based on parent_id."""
         try:
@@ -251,7 +251,7 @@ class ProductAPI(http.Controller):
                 mimetype='application/json'
             )
 
-    @http.route('/api/subcategories', type='json', auth='public', methods=['GET'], csrf=False)
+    @http.route('/api/subcategories', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
     def get_subcategories(self, parent_id=None, limit=100, **kwargs):
         """
         Fetch subcategories (child categories) optionally under a parent.
@@ -323,7 +323,7 @@ class ProductAPI(http.Controller):
 
         return build_hierarchy(categories)
 
-    @http.route('/api/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False)
+    @http.route('/api/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
     def get_product_details(self, product_id, **kwargs):
         """
         Fetch detailed product info by ID.
