@@ -251,79 +251,83 @@ class ProductAPI(http.Controller):
                 mimetype='application/json'
             )
 
-    @http.route('/api/subcategories', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
+    @http.route('/api/v1/subcategories', type='http', auth='public', methods=['GET'], csrf=False, cors='*')
     def get_subcategories(self, parent_id=None, limit=100, **kwargs):
         """
         Fetch subcategories (child categories) optionally under a parent.
         - parent_id: Optional ID of parent category (e.g., for 'Furniture').
-        - limit: Maximum number of categories to return (default: 100).
-        - Returns: List of dicts with id, name, parent_id as [id, name], and children (recursive hierarchy).
+        - limit: Maximum number of root-level categories to return (default: 100).
+        - Returns: JSON response with list of dicts containing id, name, parent_id as [id, name], and children (recursive hierarchy).
         """
         # Validate and convert parent_id
         try:
             parent_id = int(parent_id) if parent_id else None
         except (ValueError, TypeError):
-            return {'error': 'Invalid parent_id format'}
+            return request.make_json_response({'error': 'Invalid parent_id format'}, status=400)
 
-        # Define domain based on parent_id
-        domain = [('parent_id', '=', parent_id)] if parent_id else [('parent_id', '=', False)]
-
-        # Fetch all categories to build hierarchy
-        categories = request.env['product.public.category'].sudo().search_read(
-            domain=domain,
+        # Fetch ALL categories once for efficiency
+        all_categories = request.env['product.public.category'].sudo().search_read(
             fields=['id', 'name', 'parent_id'],
-            limit=int(limit),
             order='name'
         )
 
-        if not categories:
-            return {'error': 'No subcategories found'} if parent_id else {'error': 'No top-level categories found'}
+        if not all_categories:
+            return request.make_json_response({'error': 'No categories found'}, status=404)
 
-        # Fetch parent names for all categories
-        parent_ids = set(cat.get('parent_id')[0] for cat in categories if cat.get('parent_id'))
-        parent_data = {}
-        if parent_ids:
-            parents = request.env['product.public.category'].sudo().search_read(
-                domain=[('id', 'in', list(parent_ids))],
-                fields=['id', 'name']
-            )
-            parent_data = {p['id']: p['name'] for p in parents}
+        # Build complete parent_data map: {parent_id: name} for all categories
+        parent_data = {cat['id']: cat['name'] for cat in all_categories}
 
-        # Build hierarchy with parent_id as [id, name]
-        def build_hierarchy(cats, all_cats=None):
-            if all_cats is None:
-                # Fetch all categories for child lookup if not provided
-                all_cats = request.env['product.public.category'].sudo().search_read(
-                    fields=['id', 'name', 'parent_id'],
-                    order='name'
-                )
+        # Build children_map: {parent_id: [child_cats]} for fast lookups
+        children_map = {}
+        for cat in all_categories:
+            parent_id_val = cat.get('parent_id')
+            if parent_id_val:
+                parent_id_int = parent_id_val[0]
+                if parent_id_int not in children_map:
+                    children_map[parent_id_int] = []
+                children_map[parent_id_int].append(cat)
+            # Top-level have no entry in children_map
 
-            result = []
-            for cat in cats:
-                # Format parent_id as [id, name]
-                parent_id = cat.get('parent_id')
-                if parent_id:
-                    parent_name = parent_data.get(parent_id[0], 'Unknown')
-                    cat['parent_id'] = [parent_id[0], parent_name]
-                else:
-                    cat['parent_id'] = False
+        # Determine root categories based on parent_id and limit
+        if parent_id:
+            root_categories = children_map.get(parent_id, [])
+        else:
+            root_categories = [cat for cat in all_categories if not cat.get('parent_id')]
 
-                # Find children
-                children = [c for c in all_cats if c.get('parent_id') and c['parent_id'][0] == cat['id']]
-                cat['children'] = build_hierarchy(children, all_cats) if children else []
+        root_categories = root_categories[:int(limit)]  # Apply limit to roots
 
-                # Include only desired fields
-                result.append({
-                    'id': cat['id'],
-                    'name': cat['name'],
-                    'parent_id': cat['parent_id'],
-                    'children': cat['children']
-                })
-            return result
+        if not root_categories:
+            error_msg = 'No subcategories found' if parent_id else 'No top-level categories found'
+            return request.make_json_response({'error': error_msg}, status=404)
 
-        return build_hierarchy(categories)
+        # Recursive builder using pre-built maps
+        def build_hierarchy(cat):
+            # Format parent_id as [id, name]
+            parent_id_val = cat.get('parent_id')
+            if parent_id_val:
+                parent_name = parent_data.get(parent_id_val[0], 'Unknown')
+                cat['parent_id'] = [parent_id_val[0], parent_name]
+            else:
+                cat['parent_id'] = False
 
-    @http.route('/api/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
+            # Get and recurse children
+            child_cats = children_map.get(cat['id'], [])
+            cat['children'] = [build_hierarchy(child) for child in child_cats]
+
+            # Prune to desired fields
+            return {
+                'id': cat['id'],
+                'name': cat['name'],
+                'parent_id': cat['parent_id'],
+                'children': cat['children']
+            }
+
+        # Build hierarchy for roots
+        hierarchy = [build_hierarchy(cat) for cat in root_categories]
+        return request.make_json_response(hierarchy, status=200)
+
+    @http.route('/api/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False,
+                cors='*')
     def get_product_details(self, product_id, **kwargs):
         """
         Fetch detailed product info by ID.
