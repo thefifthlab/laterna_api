@@ -326,7 +326,7 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False,
+    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False,
                 cors='*')
     def get_product_details(self, product_id, **kwargs):
         """
@@ -359,5 +359,110 @@ class ProductAPI(http.Controller):
             'image_url': image_url,
             'attributes': attributes,  # Customizable options
             'in_stock': product.qty_available > 0,
+            'out_of_stock_message': product.out_of_stock_message,
             'website_url': product.website_url if hasattr(product, 'website_url') else False
         }
+
+    @http.route('/api/v1/products/assign', type='http', auth='user', methods=['POST'], csrf=False, cors='*')
+    def assign_products_to_category(self, **kwargs):
+        """
+        Assign products to a category/subcategory.
+        - JSON Body: {'product_ids': [1,2], 'category_ids': [198,199], 'replace': true}  # replace=True clears old assignments
+        - Auth: User/API key required (e.g., Authorization: Bearer <key>).
+        - Returns: {'success': true, 'assigned': [(prod_id, cat_ids)]}
+        """
+        try:
+            # Parse JSON body
+            body = json.loads(request.httprequest.data.decode('utf-8'))
+            product_ids = body.get('product_ids', [])
+            category_ids = body.get('category_ids', [])
+            replace = body.get('replace', True)  # Default: replace all cats
+
+            if not product_ids or not category_ids:
+                return request.make_json_response({'error': 'Missing product_ids or category_ids'}, status=400)
+
+            # Validate IDs exist
+            valid_prods = request.env['product.template'].sudo().browse(product_ids).exists()
+            valid_cats = request.env['product.public.category'].sudo().browse(category_ids).exists()
+            if len(valid_prods) != len(product_ids) or len(valid_cats) != len(category_ids):
+                return request.make_json_response({'error': 'Some IDs not found'}, status=404)
+
+            # Assign (batch write for efficiency)
+            assigned = []
+            for prod in valid_prods:
+                cmd = (6, 0, category_ids.ids) if replace else [(4, cid) for cid in category_ids.ids]
+                prod.sudo().write({'public_categ_ids': cmd})
+                assigned.append((prod.id, category_ids.ids))
+
+            return request.make_json_response({'success': True, 'assigned': assigned}, status=200)
+
+        except json.JSONDecodeError:
+            return request.make_json_response({'error': 'Invalid JSON body'}, status=400)
+        except Exception as e:
+            return request.make_json_response({'error': str(e)}, status=500)
+
+
+
+    @http.route('/api/v1/products/by_subcategory',
+        type='json', auth='public', methods=['POST'], csrf=False, cors='*')
+    def get_products_by_parent_and_subcategory(self, **kwargs):
+        """
+        Fetch all products under a given parent category and subcategory.
+        Example body:
+        {
+            "parent_id": 10,
+            "subcategory_id": 25
+        }
+        """
+        try:
+            # Safely get the JSON body
+            data = request.jsonrequest if hasattr(request, 'jsonrequest') else request.httprequest.get_json(force=True)
+
+            parent_id = data.get('parent_id')
+            subcategory_id = data.get('subcategory_id')
+
+            if not parent_id or not subcategory_id:
+                return {'error': 'Both parent_id and subcategory_id are required.'}
+
+            parent = request.env['product.public.category'].sudo().browse(parent_id)
+            subcategory = request.env['product.public.category'].sudo().browse(subcategory_id)
+
+            # Validate existence
+            if not parent.exists():
+                return {'error': f'Parent category ID {parent_id} not found.'}
+            if not subcategory.exists():
+                return {'error': f'Subcategory ID {subcategory_id} not found.'}
+
+            # Ensure subcategory belongs to parent
+            if subcategory.parent_id.id != parent.id:
+                return {'error': f'Subcategory "{subcategory.name}" does not belong to parent "{parent.name}".'}
+
+            # Search products under subcategory
+            products = request.env['product.template'].sudo().search([
+                ('public_categ_ids', 'child_of', subcategory.id),
+                ('sale_ok', '=', True),
+                ('website_published', '=', True),
+            ])
+
+            result = [{
+                'id': p.id,
+                'name': p.name,
+                'price': p.list_price,
+                'currency': p.currency_id.name,
+                'subcategory': subcategory.name,
+                'parent_category': parent.name,
+                'description': p.website_description or '',
+                'image_url': f"/web/image/product.template/{p.id}/image_1920",
+                'available_in_stock': p.qty_available,
+            } for p in products]
+
+            return {
+                'parent_category': {'id': parent.id, 'name': parent.name},
+                'subcategory': {'id': subcategory.id, 'name': subcategory.name},
+                'total_products': len(result),
+                'products': result,
+            }
+
+        except Exception as e:
+            _logger.exception("Error fetching products by subcategory")
+            return {'error': str(e)}
