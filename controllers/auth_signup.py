@@ -70,7 +70,7 @@ class LaternaAuthenticationSignUp(http.Controller):
 
             # Send welcome email
             try:
-                template = request.env.ref('laterna_auth.mail_template_welcome', raise_if_not_found=False)
+                template = request.env.ref('laternal_api.mail_template_welcome', raise_if_not_found=False)
                 if template:
                     template.sudo().with_context(
                         lang=user.lang

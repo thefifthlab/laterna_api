@@ -4,24 +4,40 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
+
 class LaternaAuthenticationLogout(http.Controller):
-    @http.route('/api/v1/auth/logout', type='json', auth='public', methods=['POST'])
+
+    @http.route('/api/v1/auth/logout', type='json', auth='public', methods=['POST'], csrf=False)
     def logout(self):
-        """Handle logout and update session tracking."""
-        session_id = request.session.sid
-        user = request.env.user
-        ip_address = request.httprequest.remote_addr
+        """Handle logout using Odoo's built-in session management."""
+        try:
+            user = request.env.user
+            ip_address = request.httprequest.remote_addr
 
-        _logger.info(
-            "[%s] Logout API endpoint triggered for user: %s, IP: %s", fields.Datetime.now(), user.login, ip_address
-        )
+            _logger.info(
+                "Logout initiated - User: %s, IP: %s",
+                user.login,
+                ip_address
+            )
 
-        # Close the session in ir.sessions
-        session_closed = request.env['ir.sessions'].sudo().close_session(session_id)
-        if not session_closed:
-            _logger.warning("No active session found for session_id: %s", session_id)
+            # Simply invalidate the Odoo session - this is the core logout
+            request.session.logout(keep_db=True)
 
-        # Invalidate the Odoo session
-        request.session.logout(keep_db=True)
+            _logger.info("Logout successful for user: %s", user.login)
 
-        return {'status': 'success', 'message': 'Logged out successfully'}
+            return {
+                'status': 'success',
+                'message': 'Logged out successfully'
+            }
+
+        except Exception as e:
+            _logger.error(
+                "Logout error - User: %s, IP: %s, Error: %s",
+                user.login if user else 'Unknown',
+                ip_address,
+                str(e)
+            )
+            return {
+                'status': 'error',
+                'message': 'Logout failed'
+            }
