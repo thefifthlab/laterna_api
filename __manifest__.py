@@ -18,7 +18,7 @@
     # always loaded
     'data': [
         'security/ir.model.access.csv',
-        #'views/views.xml',
+        #'views/mail_template_welcome.xml',
         #'views/product_public_category_views.xml',
     ],
     # only loaded in demonstration mode

@@ -7,7 +7,7 @@ _logger = logging.getLogger(__name__)
 
 class LaternaAuthenticationLogout(http.Controller):
 
-    @http.route('/api/v1/auth/logout', type='json', auth='public', methods=['POST'], csrf=False)
+    @http.route('/api/v1/auth/logout', type='json', auth="public", csrf=False, methods=['POST'], cors="*")
     def logout(self):
         """Handle logout using Odoo's built-in session management."""
         try:

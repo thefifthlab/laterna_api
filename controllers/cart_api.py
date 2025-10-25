@@ -91,6 +91,7 @@ class CartAPI(http.Controller):
             self._log_event('jwt_validation_error', client_ip, request_time, error=str(e), token=token[:10] + '...' if token else 'None')
             return None, {'status': 'error', 'message': f'Invalid token: {str(e)}'}, 401
 
+
     @http.route('/api/v1/cart/add', type='json', auth="public", csrf=False, methods=['POST'], cors="*")
     def add_to_cart(self, **kwargs):
         """Add product to cart with JWT authentication."""
