@@ -6,4 +6,4 @@ from . import auth_signup
 from . import products_api
 from . import cart_api
 from . import best_selling_products_api
-from . import auth_signup_guest
+from . import portal_auth_signup

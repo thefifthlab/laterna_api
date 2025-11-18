@@ -5,11 +5,27 @@ import time
 
 class CheckoutAPI(http.Controller):
 
-    @http.route('/api/checkout/cart', type='http', auth='public', methods=['POST'], csrf=False)
+    # ------------------------------
+    # Helper: API Key validation
+    # ------------------------------
+    def _check_api_key(self):
+        api_key = request.httprequest.headers.get('X-API-Key')
+        expected_key = request.env['ir.config_parameter'].sudo().get_param('checkout_api.secret_key')
+        if not api_key or api_key != expected_key:
+            return request.make_response(json.dumps({'error': 'Unauthorized'}), status=401)
+        return None
+
+    # ------------------------------
+    # 1. Add product to cart
+    # ------------------------------
+    @http.route('/api/checkout/cart', type='http', auth='none', methods=['POST'], csrf=False)
     def add_to_cart(self, **kw):
-        """Add product to cart. POST: {'product_id': 1, 'quantity': 1, 'partner_id': 1, 'email': 'guest@example.com'}."""
         try:
-            data = json.loads(request.httprequest.data)
+            auth_error = self._check_api_key()
+            if auth_error:
+                return auth_error
+
+            data = json.loads(request.httprequest.data or '{}')
             product_id = data.get('product_id')
             quantity = data.get('quantity', 1)
             partner_id = data.get('partner_id')
@@ -20,10 +36,17 @@ class CheckoutAPI(http.Controller):
 
             order = request.env['sale.order'].sudo().create_cart(partner_id=partner_id)
             if not partner_id and email:
-                order.partner_id.email = email  # Update guest email if provided
+                order.partner_id.email = email
             order.add_product_to_cart(product_id, quantity)
+
             totals = order._get_totals()
-            items = [{'id': l.id, 'name': l.product_id.name, 'qty': l.product_uom_qty, 'price': l.price_unit} for l in order.order_line]
+            items = [{
+                'id': l.id,
+                'name': l.product_id.name,
+                'qty': l.product_uom_qty,
+                'price': l.price_unit
+            } for l in order.order_line]
+
             return request.make_response(json.dumps({
                 'success': True,
                 'cart_id': order.id,
@@ -31,33 +54,54 @@ class CheckoutAPI(http.Controller):
                 'items': items,
                 **totals
             }), headers={'Content-Type': 'application/json'})
+
         except Exception as e:
             return request.make_response(json.dumps({'error': str(e)}), status=400)
 
-    @http.route('/api/checkout/cart/<int:cart_id>', type='http', auth='public', methods=['GET'], csrf=False)
+    # ------------------------------
+    # 2. Get Cart Details
+    # ------------------------------
+    @http.route('/api/checkout/cart/<int:cart_id>', type='http', auth='none', methods=['GET'], csrf=False)
     def get_cart(self, cart_id):
-        """Get cart details. GET: /api/checkout/cart/1."""
         try:
+            auth_error = self._check_api_key()
+            if auth_error:
+                return auth_error
+
             order = request.env['sale.order'].sudo().browse(cart_id)
             if not order.exists():
                 return request.make_response(json.dumps({'error': 'Cart not found'}), status=404)
+
             totals = order._get_totals()
-            items = [{'id': l.id, 'name': l.product_id.name, 'qty': l.product_uom_qty, 'subtotal': l.price_subtotal} for l in order.order_line]
+            items = [{
+                'id': l.id,
+                'name': l.product_id.name,
+                'qty': l.product_uom_qty,
+                'subtotal': l.price_subtotal
+            } for l in order.order_line]
+
             return request.make_response(json.dumps({
                 'success': True,
                 'cart_id': cart_id,
-                'user_type': 'guest' if not order.partner_id.id or order.partner_id.name.startswith('Guest_') else 'partner',
+                'user_type': 'guest' if order.partner_id.name.startswith('Guest_') else 'partner',
                 'items': items,
                 **totals
             }), headers={'Content-Type': 'application/json'})
+
         except Exception as e:
             return request.make_response(json.dumps({'error': str(e)}), status=400)
 
-    @http.route('/api/checkout/update/<int:cart_id>', type='http', auth='public', methods=['POST'], csrf=False)
+    # ------------------------------
+    # 3. Update Cart Line
+    # ------------------------------
+    @http.route('/api/checkout/update/<int:cart_id>', type='http', auth='none', methods=['POST'], csrf=False)
     def update_cart(self, cart_id, **kw):
-        """Update quantity or remove. POST: {'line_id': 1, 'quantity': 2} or {'line_id': 1, 'remove': true}."""
         try:
-            data = json.loads(request.httprequest.data)
+            auth_error = self._check_api_key()
+            if auth_error:
+                return auth_error
+
+            data = json.loads(request.httprequest.data or '{}')
             line_id = data.get('line_id')
             quantity = data.get('quantity')
             remove = data.get('remove')
@@ -68,20 +112,28 @@ class CheckoutAPI(http.Controller):
             order = request.env['sale.order'].sudo().browse(cart_id)
             if not order.exists():
                 return request.make_response(json.dumps({'error': 'Cart not found'}), status=404)
+
             totals = order.update_cart_line(line_id, quantity, remove)
             return request.make_response(json.dumps({
                 'success': True,
                 'cart_id': cart_id,
                 **totals
             }), headers={'Content-Type': 'application/json'})
+
         except Exception as e:
             return request.make_response(json.dumps({'error': str(e)}), status=400)
 
-    @http.route('/api/checkout/discount/<int:cart_id>', type='http', auth='public', methods=['POST'], csrf=False)
+    # ------------------------------
+    # 4. Apply Discount Code
+    # ------------------------------
+    @http.route('/api/checkout/discount/<int:cart_id>', type='http', auth='none', methods=['POST'], csrf=False)
     def apply_discount(self, cart_id, **kw):
-        """Apply discount. POST: {'code': 'SAVE10'}."""
         try:
-            data = json.loads(request.httprequest.data)
+            auth_error = self._check_api_key()
+            if auth_error:
+                return auth_error
+
+            data = json.loads(request.httprequest.data or '{}')
             code = data.get('code')
             if not code:
                 return request.make_response(json.dumps({'error': 'Discount code is required'}), status=400)
@@ -89,37 +141,39 @@ class CheckoutAPI(http.Controller):
             order = request.env['sale.order'].sudo().browse(cart_id)
             if not order.exists():
                 return request.make_response(json.dumps({'error': 'Cart not found'}), status=404)
+
             result = order.apply_discount(code)
             return request.make_response(json.dumps({
                 'success': True,
                 **result
             }), headers={'Content-Type': 'application/json'})
+
         except Exception as e:
             return request.make_response(json.dumps({'error': str(e)}), status=400)
 
-    @http.route('/api/checkout/confirm/<int:cart_id>', type='http', auth='public', methods=['POST'], csrf=False)
+    # ------------------------------
+    # 5. Confirm Checkout
+    # ------------------------------
+    @http.route('/api/checkout/confirm/<int:cart_id>', type='http', auth='none', methods=['POST'], csrf=False)
     def confirm_order(self, cart_id, **kw):
-        """Confirm checkout. POST: {'address': {'street': '123 Main St', 'city': 'Anytown'}}."""
         try:
-            data = json.loads(request.httprequest.data)
+            auth_error = self._check_api_key()
+            if auth_error:
+                return auth_error
+
+            data = json.loads(request.httprequest.data or '{}')
             address_data = data.get('address')
 
             order = request.env['sale.order'].sudo().browse(cart_id)
             if not order.exists():
                 return request.make_response(json.dumps({'error': 'Cart not found'}), status=404)
+
             result = order.confirm_checkout(address_data)
             return request.make_response(json.dumps({
                 'success': True,
                 'user_type': 'guest' if order.partner_id.name.startswith('Guest_') else 'partner',
                 **result
             }), headers={'Content-Type': 'application/json'})
+
         except Exception as e:
             return request.make_response(json.dumps({'error': str(e)}), status=400)
-
-    @http.route('/api/checkout/*', type='http', auth='public')
-    def api_auth_check(self, **kw):
-        """Basic API key authentication."""
-        api_key = request.httprequest.headers.get('X-API-Key')
-        if not api_key or api_key != 'your_secret_key':
-            return request.make_response(json.dumps({'error': 'Unauthorized'}), status=401)
-        return None

@@ -18,7 +18,8 @@
     # always loaded
     'data': [
         'security/ir.model.access.csv',
-        #'views/mail_template_welcome.xml',
+        'views/nigeria_states.xml',
+        'views/mail_template_data.xml',
         #'views/product_public_category_views.xml',
     ],
     # only loaded in demonstration mode

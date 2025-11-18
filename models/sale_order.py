@@ -4,75 +4,79 @@ import time
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
 
-    @api.model
-    def create_cart(self, partner_id=False, website_id=1):
-        """Create or get a cart for a partner or guest."""
-        if not partner_id:
-            # Create guest partner if none provided
-            guest_partner = self.env['res.partner'].sudo().create({
-                'name': f'Guest_{request.httprequest.remote_addr}_{int(time.time())}',
-                'is_company': False,
-                'type': 'delivery',
-                'email': f'guest_{int(time.time())}@example.com',
+    # ------------------------------
+    # Create new cart
+    # ------------------------------
+    def create_cart(self, partner_id=None):
+        partner = None
+        if partner_id:
+            partner = self.env['res.partner'].browse(partner_id)
+        else:
+            partner = self.env['res.partner'].create({
+                'name': f'Guest_{int(time.time())}',
+                'customer_rank': 1
             })
-            partner_id = guest_partner.id
-        order = self.env['sale.order'].sudo().search([
-            ('partner_id', '=', partner_id),
-            ('website_id', '=', website_id),
-            ('state', '=', 'draft')
-        ], limit=1)
-        if not order:
-            order = self.create({
-                'partner_id': partner_id,
-                'website_id': website_id,
-            })
-        return order
+        return self.create({'partner_id': partner.id, 'state': 'draft'})
 
-    def add_product_to_cart(self, product_id, quantity=1):
-        """Add product to cart with validation."""
+    # ------------------------------
+    # Add product to cart
+    # ------------------------------
+    def add_product_to_cart(self, product_id, quantity):
         product = self.env['product.product'].browse(product_id)
         if not product.exists():
             raise ValueError("Product not found")
+
         line = self.order_line.filtered(lambda l: l.product_id.id == product_id)
         if line:
-            line.write({'product_uom_qty': line.product_uom_qty + quantity})
+            line.product_uom_qty += quantity
         else:
-            self.write({'order_line': [(0, 0, {
-                'product_id': product_id,
-                'product_uom_qty': quantity,
-                'price_unit': product.lst_price,
-            })]})
-        return self._get_totals()
+            self.write({
+                'order_line': [(0, 0, {
+                    'product_id': product.id,
+                    'product_uom_qty': quantity,
+                    'price_unit': product.lst_price,
+                })]
+            })
+        return True
 
+    # ------------------------------
+    # Update or remove line
+    # ------------------------------
     def update_cart_line(self, line_id, quantity=None, remove=False):
-        """Update or remove a cart line."""
-        line = self.order_line.browse(line_id)
+        line = self.env['sale.order.line'].browse(line_id)
         if not line.exists():
-            raise ValueError("Cart line not found")
+            raise ValueError("Line not found")
         if remove:
             line.unlink()
         elif quantity is not None:
             line.product_uom_qty = quantity
         return self._get_totals()
 
-    def _get_totals(self):
-        """Compute subtotal, taxes, and total."""
-        return {
-            'subtotal': sum(self.order_line.mapped('price_subtotal')),
-            'taxes': self.amount_tax,
-            'total': self.amount_total,
-        }
-
+    # ------------------------------
+    # Apply discount
+    # ------------------------------
     def apply_discount(self, code):
-        """Apply discount code (simplified example)."""
         if code == 'SAVE10':
-            self._compute_amount_all()  # Recalculate amounts
-            return {'discount_applied': True, 'total': self.amount_total * 0.9, **self._get_totals()}
-        raise ValueError("Invalid discount code")
+            discount = 10
+            self.amount_total = self.amount_total * 0.9
+            return {'discount_applied': True, 'discount_percent': discount, 'new_total': self.amount_total}
+        return {'discount_applied': False, 'message': 'Invalid code'}
 
+    # ------------------------------
+    # Confirm checkout
+    # ------------------------------
     def confirm_checkout(self, address_data=None):
-        """Confirm order with optional address update."""
         if address_data:
             self.partner_id.write(address_data)
         self.action_confirm()
-        return {'order_id': self.id, 'state': self.state, 'tracking_url': f'/my/orders/{self.id}'}
+        return {'order_id': self.id, 'status': self.state}
+
+    # ------------------------------
+    # Compute totals
+    # ------------------------------
+    def _get_totals(self):
+        return {
+            'subtotal': self.amount_untaxed,
+            'tax': self.amount_tax,
+            'total': self.amount_total,
+        }
