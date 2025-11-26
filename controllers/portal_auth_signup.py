@@ -3,7 +3,6 @@ import json
 import logging
 import re
 from datetime import datetime
-
 from odoo import http, fields
 from odoo.http import request
 from odoo.exceptions import ValidationError, AccessError
@@ -37,14 +36,7 @@ class GuestUser(http.Controller):
     **Rate-limit** – decorate with ``@http.rate_limit(...)`` if the addon is installed.
     """
 
-    @http.route(
-        "/api/v1/portal/auth/register",
-        type="json",
-        auth="public",
-        methods=["POST"],
-        csrf=False,
-        cors="*",
-    )
+    @http.route("/api/v1/portal/auth/register", type="json", auth="public", methods=["POST"], csrf=False, cors="*")
     def portal_auth_signup(self, **kwargs):
         """
         Full request / response spec is documented at the end of the file.
@@ -180,14 +172,20 @@ class GuestUser(http.Controller):
     # Helper – uniform JSON error response
     # ------------------------------------------------------------------
     def _json_error(self, error_msg, status=400):
-        """Return dict for JSON-RPC, or Response for raw HTTP."""
-        if request.httprequest:
-            # Direct HTTP call → return Response
-            return request.make_response(
-                json.dumps({"error": error_msg}),
-                headers=[("Content-Type", "application/json")],
-                status=status,
-            )
-        else:
-            # JSON-RPC call → return dict
-            return {"error": error_msg, "status": status}
+        """Works for both direct HTTP and JSON-RPC calls"""
+        response = {
+            "success": False,
+            "error": error_msg,
+            "status": status,
+        }
+
+        # If it's a direct HTTP request (not JSON-RPC), return proper Response
+        if getattr(request, 'is_jsonrpc', False) or not request.httprequest:
+            return response  # JSON-RPC expects plain dict
+
+        # Raw HTTP request → return real Response with correct status
+        return request.make_response(
+            json.dumps(response, ensure_ascii=False),
+            headers=[("Content-Type", "application/json")],
+            status=status,
+        )

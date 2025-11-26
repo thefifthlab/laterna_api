@@ -13,7 +13,7 @@
     'version': '18.0',
 
     # any module necessary for this one to work correctly
-    'depends': ['base', 'web', 'website', 'website_sale', 'stock'],
+    'depends': ['base', 'web', 'website', 'sale', 'website_sale', 'stock'],
 
     # always loaded
     'data': [

@@ -10,70 +10,138 @@ _logger = logging.getLogger(__name__)
 
 class ProductAPI(http.Controller):
 
-    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+    @http.route('/api/v1/products', type='http',  auth='public', methods=['GET'], csrf=False, cors="*")
     def list_products(self, **kwargs):
         try:
-            # Parse query parameters
-            page = int(kwargs.get('page', 1))
-            limit = int(kwargs.get('limit', 20))
+            # === Input validation ===
+            page = max(1, int(kwargs.get('page', 1)))
+            limit = min(100, max(1, int(kwargs.get('limit', 20))))  # Cap at 100 to prevent abuse
             category_id = kwargs.get('category_id')
-            search = kwargs.get('search')
+            search = (kwargs.get('search') or '').strip()[:100]  # Limit search string length
             sort = kwargs.get('sort')
 
-            # Build domain for published products
-            domain = [('website_published', '=', True)]
-            if category_id:
-                domain.append(('public_categ_ids', 'in', [int(category_id)]))
+            # === Domain: published products only ===
+            domain = [('website_published', '=', True), ('sale_ok', '=', True)]
+
+            if category_id and category_id.isdigit():
+                domain += [('public_categ_ids', 'child_of', int(category_id))]  # Hierarchical categories
+
             if search:
-                domain.append(('name', 'ilike', search))
+                domain += ['|', ('name', 'ilike', search), ('description_sale', 'ilike', search)]
 
-            # Determine sort order
-            sort_order = 'id'
-            if sort == 'price_asc':
-                sort_order = 'list_price asc'
-            elif sort == 'price_desc':
-                sort_order = 'list_price desc'
-            elif sort == 'name_desc':
-                sort_order = 'name desc'
+            # === Safe sorting ===
+            sort_mapping = {
+                'price_asc': 'list_price asc',
+                'price_desc': 'list_price desc',
+                'name_asc': 'name asc',
+                'name_desc': 'name desc',
+                'newest': 'create_date desc',
+            }
+            order = sort_mapping.get(sort, 'website_sequence DESC, id DESC')  # website_sequence is on product.template
 
-            # Search products
-            products = request.env['product.template'].sudo().search(
-                domain, offset=(page - 1) * limit, limit=limit, order=sort_order
-            )
+            # === Search (no sudo() — uses public user rights) ===
+            Product = request.env['product.template']
+            products = Product.search(domain, limit=limit, offset=(page - 1) * limit, order=order)
+            total = Product.search_count(domain)
 
-            # Get current website's pricelist for proper pricing
+            # === Website & pricelist ===
             website = request.env['website'].get_current_website()
             pricelist = website.pricelist_id
+            if not pricelist:
+                # Fallback to first active pricelist
+                pricelist = request.env['product.pricelist'].search([('active', '=', True)], limit=1)
+            base_url = request.env['ir.config_parameter'].sudo().get_param('web.base.url').rstrip('/')
 
-            # Prepare response data
             product_list = []
             for product in products:
-                # Get price using pricelist rules
-                price = self._get_product_price(product, pricelist)
+                # === FIXED PRICING: Correct get_product_price call (Odoo 18 signature) ===
+                price = float(product.list_price or 0.0)  # Base fallback
+                if pricelist and product.product_variant_ids:
+                    try:
+                        # Use first variant (standard for templates)
+                        variant = product.product_variant_id
+                        # FIXED: [pricelist.id] (list of IDs), variant.id (int), qty, partner=False
+                        prices_dict = pricelist.get_product_price(
+                            [pricelist.id], variant.id, 1.0, False
+                        )
+                        applied_price = prices_dict.get(variant.id, price)
+                        price = float(applied_price or price)
+                    except Exception as price_err:
+                        _logger.warning("Pricelist price calc failed for product %s (ID %s): %s", product.name,
+                                        product.id, price_err)
+                        # Keep list_price fallback
+
+                price = round(price, 2)
+
+                # === FIXED NAME: Use model.name_get() for full name (includes attributes) ===
+                full_name = product.name  # Fallback to simple name
+                try:
+                    name_get_result = Product.name_get([product.id])
+                    if name_get_result:
+                        full_name = name_get_result[0][1]  # [id, name] tuple
+                except Exception as name_err:
+                    _logger.warning("name_get failed for product %s (ID %s): %s", product.name, product.id, name_err)
+
+                # === Categories: Sort by 'sequence' ===
+                categories = []
+                primary_category = ""
+                if product.public_categ_ids:
+                    sorted_categs = product.public_categ_ids.sorted('sequence')  # FIXED: Use 'sequence'
+                    categories = [categ.display_name for categ in sorted_categs]
+                    primary_category = sorted_categs[0].display_name if sorted_categs else ""
+
+                # Image URL
+                image_url = f"{base_url}/web/image/product.template/{product.id}/image_1920" \
+                    if product.image_1920 else ""
 
                 product_list.append({
                     'id': product.id,
-                    'name': product.name,
+                    'name': full_name,
                     'price': price,
-                    'description': product.description or '',
-                    'image_url': self._get_image_url(product),
-                    'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                    'currency': pricelist.currency_id.name if pricelist and pricelist.currency_id else 'USD',
+                    'description': product.website_description or product.description_sale or '',
+                    'image_url': image_url,
+                    'stock': int(product.qty_available or 0),
+                    'in_stock': (product.qty_available or 0) > 0,
+
+                    # === Categories ===
+                    'primary_category': primary_category,
+                    'categories': categories,  # e.g., ["Electronics", "Electronics > Phones"]
+                    'category_ids': [categ.id for categ in product.public_categ_ids],
                 })
 
-            total_count = request.env['product.template'].sudo().search_count(domain)
-            total_pages = math.ceil(total_count / limit) if limit else 1
-
             response = {
+                "success": True,
                 "products": product_list,
-                "total": total_count,
-                "pages": total_pages
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "pages": math.ceil(total / limit) if limit else 1
+                }
             }
 
-            return Response(json.dumps(response), status=200, content_type='application/json')
+            return Response(
+                json.dumps(response, ensure_ascii=False),
+                status=200,
+                headers={'Content-Type': 'application/json; charset=utf-8'}
+            )
 
+        except ValueError as ve:
+            # Handle bad inputs (e.g., non-int page/limit)
+            _logger.warning("Invalid input params: %s", ve)
+            return Response(
+                json.dumps({"success": False, "error": "Invalid parameters"}),
+                status=400,
+                headers={'Content-Type': 'application/json'}
+            )
         except Exception as e:
-            error = {'error': str(e)}
-            return Response(json.dumps(error), status=500, content_type='application/json')
+            _logger.exception("Product API Error: %s", e)
+            return Response(
+                json.dumps({"success": False, "error": "Internal server error"}),
+                status=500,
+                headers={'Content-Type': 'application/json'}
+            )
 
     def _get_product_price(self, product, pricelist):
         """Get product price considering pricelist rules"""
