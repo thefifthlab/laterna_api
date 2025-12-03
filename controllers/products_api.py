@@ -7,17 +7,9 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
-
 class ProductAPI(http.Controller):
 
-    @http.route(
-        '/api/v1/products',
-        type='http',
-        auth='public',
-        methods=['GET'],
-        csrf=False,
-        cors='*',
-    )
+    @http.route('/api/v1/products', type='json', auth='public', csrf=False, methods=['GET'], cors='*')
     def list_products(self, **kwargs):
         """
         Public product catalogue endpoint.
@@ -29,33 +21,27 @@ class ProductAPI(http.Controller):
             sort (str)          – price_asc|price_desc|name_asc|name_desc|newest
         """
         try:
-            # ------------------------------------------------------------------
-            # 1. Input validation (defensive)
-            # ------------------------------------------------------------------
+            # ------------------------------
+            # 1. Input validation
+            # ------------------------------
             page = max(1, int(kwargs.get('page', 1)))
             limit = min(100, max(1, int(kwargs.get('limit', 20))))
             category_id = kwargs.get('category_id')
             search = (kwargs.get('search') or '').strip()[:100]
             sort = kwargs.get('sort')
 
-            # ------------------------------------------------------------------
-            # 2. Base domain – only published & saleable products
-            # ------------------------------------------------------------------
+            # ------------------------------
+            # 2. Base domain
+            # ------------------------------
             domain = [('website_published', '=', True), ('sale_ok', '=', True)]
-
-            if category_id and category_id.isdigit():
-                domain = domain + [('public_categ_ids', 'child_of', int(category_id))]
-
+            if category_id and str(category_id).isdigit():
+                domain += [('public_categ_ids', 'child_of', int(category_id))]
             if search:
-                domain = domain + [
-                    '|',
-                    ('name', 'ilike', search),
-                    ('description_sale', 'ilike', search),
-                ]
+                domain += ['|', ('name', 'ilike', search), ('description_sale', 'ilike', search)]
 
-            # ------------------------------------------------------------------
-            # 3. Sorting whitelist
-            # ------------------------------------------------------------------
+            # ------------------------------
+            # 3. Sorting
+            # ------------------------------
             sort_mapping = {
                 'price_asc': 'list_price asc',
                 'price_desc': 'list_price desc',
@@ -65,79 +51,48 @@ class ProductAPI(http.Controller):
             }
             order = sort_mapping.get(sort, 'website_sequence DESC, id DESC')
 
-            # ------------------------------------------------------------------
-            # 4. Search (public rights – no sudo)
-            # ------------------------------------------------------------------
+            # ------------------------------
+            # 4. Search products
+            # ------------------------------
             ProductTemplate = request.env['product.template']
-            products = ProductTemplate.search(
-                domain, offset=(page - 1) * limit, limit=limit, order=order
-            )
+            products = ProductTemplate.search(domain, offset=(page - 1) * limit, limit=limit, order=order)
             total = ProductTemplate.search_count(domain)
 
-            # ------------------------------------------------------------------
+            # ------------------------------
             # 5. Pricelist & website context
-            # ------------------------------------------------------------------
+            # ------------------------------
             website = request.env['website'].get_current_website()
-            pricelist = website.pricelist_id or request.env['product.pricelist'].search(
-                [('active', '=', True)], limit=1
-            )
-            base_url = (
-                request.env['ir.config_parameter']
-                .sudo()
-                .get_param('web.base.url', default='')
-                .rstrip('/')
-            )
+            pricelist = website.pricelist_id or request.env['product.pricelist'].search([('active', '=', True)], limit=1)
+            base_url = request.env['ir.config_parameter'].sudo().get_param('web.base.url', default='').rstrip('/')
 
-            # ------------------------------------------------------------------
-            # 6. Build response payload
-            # ------------------------------------------------------------------
-            product_list = []
-            for tmpl in products:
-                # ---- pricing -------------------------------------------------
-                price = float(tmpl.list_price or 0.0)
-
+            # ------------------------------
+            # 6. Build product payload
+            # ------------------------------
+            def get_product_price(tmpl):
+                """Compute product price considering pricelist."""
+                price = tmpl.list_price
                 if pricelist and tmpl.product_variant_ids:
-                    variant = tmpl.product_variant_id  # first variant (standard)
+                    variant = tmpl.product_variant_id
                     if variant:
                         try:
-                            price = pricelist.get_product_price(
-                                variant, 1.0, partner=False
-                            )
-                        except Exception as exc:  # pragma: no cover
-                            _logger.warning(
-                                "Pricelist error for %s (tmpl %s): %s",
-                                tmpl.name, tmpl.id, exc,
-                            )
-                price = round(price, 2)
+                            price = pricelist.get_product_price(variant, 1, partner=False)
+                        except Exception as exc:
+                            _logger.warning("Pricelist error for %s (tmpl %s): %s", tmpl.name, tmpl.id, exc)
+                return round(price, 2)
 
-                # ---- full name (with attributes) -----------------------------
+            def get_image_url(tmpl):
+                return f"{base_url}/web/image/product.template/{tmpl.id}/image_1920" if tmpl.image_1920 else ''
+
+            product_list = []
+            for tmpl in products:
+                price = get_product_price(tmpl)
                 full_name = tmpl.display_name
+                categories = [c.display_name for c in tmpl.public_categ_ids.sorted('sequence')] if tmpl.public_categ_ids else []
+                primary_category = categories[0] if categories else ''
 
-                # ---- categories -----------------------------------------------
-                categories = []
-                primary_category = ''
-                if tmpl.public_categ_ids:
-                    sorted_cats = tmpl.public_categ_ids.sorted('sequence')
-                    categories = [c.display_name for c in sorted_cats]
-                    primary_category = sorted_cats[0].display_name if sorted_cats else ''
-
-                # ---- image ----------------------------------------------------
-                image_url = (
-                    f"{base_url}/web/image/product.template/{tmpl.id}/image_1920"
-                    if tmpl.image_1920
-                    else ''
-                )
-
-                # ---- stock (aggregate from variants) -------------------------
-                # ---- stock (safe for public API) ----
-                stock_qty = 0
-                in_stock = False
-                if tmpl.product_variant_ids:
-                    try:
-                        stock_qty = sum(v.sudo().qty_available for v in tmpl.product_variant_ids)
-                        in_stock = stock_qty > 0
-                    except Exception as e:
-                        _logger.warning("Stock computation failed for product %s: %s", tmpl.id, e)
+                # Compute stock safely
+                stock_qty = sum(v.sudo().qty_available for v in tmpl.product_variant_ids) if tmpl.product_variant_ids else 0
+                in_stock = stock_qty > 0
 
                 product_list.append({
                     'id': tmpl.id,
@@ -145,7 +100,7 @@ class ProductAPI(http.Controller):
                     'price': price,
                     'currency': pricelist.currency_id.name if pricelist and pricelist.currency_id else 'USD',
                     'description': tmpl.website_description or tmpl.description_sale or '',
-                    'image_url': image_url,
+                    'image_url': get_image_url(tmpl),
                     'stock': int(stock_qty),
                     'in_stock': in_stock,
                     'primary_category': primary_category,
@@ -153,9 +108,9 @@ class ProductAPI(http.Controller):
                     'category_ids': tmpl.public_categ_ids.ids,
                 })
 
-            # ------------------------------------------------------------------
-            # 7. JSON response
-            # ------------------------------------------------------------------
+            # ------------------------------
+            # 7. Build JSON response
+            # ------------------------------
             payload = {
                 "success": True,
                 "products": product_list,
@@ -166,63 +121,15 @@ class ProductAPI(http.Controller):
                     "pages": math.ceil(total / limit) if limit else 1,
                 },
             }
+            return payload
 
-            headers = {
-                'Content-Type': 'application/json; charset=utf-8',
-                'Access-Control-Allow-Origin': '*',
-            }
-            return Response(
-                json.dumps(payload, ensure_ascii=False, default=str),
-                status=200,
-                headers=headers,
-            )
-
-        # ----------------------------------------------------------------------
-        # Error handling
-        # ----------------------------------------------------------------------
         except ValueError as ve:
-            _logger.warning("Bad request parameters: %s", ve)
-            return Response(
-                json.dumps({"success": False, "error": "Invalid parameters"}),
-                status=400,
-                headers={'Content-Type': 'application/json'},
-            )
-        except Exception as exc:  # pragma: no cover
-            _logger.exception("Product API unexpected error")
-            return Response(
-                json.dumps({"success": False, "error": "Internal server error"}),
-                status=500,
-                headers={'Content-Type': 'application/json'},
-            )
-    def _get_product_price(self, product, pricelist):
-        """Get product price considering pricelist rules"""
-        # Use the product's list_price as fallback
-        price = product.list_price
+            _logger.warning("Invalid request parameters: %s", ve)
+            return {"success": False, "error": "Invalid parameters"}
 
-        try:
-            # Try to get price from pricelist
-            price = pricelist.get_product_price(product, 1, False)
-        except Exception:
-            # If that fails, try a different approach
-            try:
-                product_context = dict(request.env.context)
-                product_context.update({
-                    'pricelist': pricelist.id,
-                    'quantity': 1
-                })
-                product = product.with_context(product_context)
-                price = product.price
-            except Exception:
-                # Fall back to list_price if all else fails
-                pass
-
-        return price
-
-    def _get_image_url(self, product):
-        if product.image_1920:
-            base_url = request.httprequest.host_url.strip('/')
-            return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
-        return ''
+        except Exception as exc:
+            _logger.exception("Unexpected error in list_products")
+            return {"success": False, "error": "Internal server error"}
 
     @http.route('/api/v1/categories', type='http', auth='public', methods=['GET'], csrf=False, cors='*')
     def list_categories(self, **kwargs):
@@ -447,10 +354,8 @@ class ProductAPI(http.Controller):
         except Exception as e:
             return request.make_json_response({'error': str(e)}, status=500)
 
-
-
     @http.route('/api/v1/products/by_subcategory',
-        type='json', auth='public', methods=['POST'], csrf=False, cors='*')
+                type='json', auth='public', methods=['POST'], csrf=False, cors='*')
     def get_products_by_parent_and_subcategory(self, **kwargs):
         """
         Fetch all products under a given parent category and subcategory.
@@ -512,3 +417,4 @@ class ProductAPI(http.Controller):
         except Exception as e:
             _logger.exception("Error fetching products by subcategory")
             return {'error': str(e)}
+

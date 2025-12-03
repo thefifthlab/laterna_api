@@ -10,6 +10,6 @@ from . import portal_auth_signup
 from . import coupon_api
 from . import api_controller
 from . import get_profile
-# from . import product_category_api
 from . import website_sale_cart_api
 from . import custom_websit_sale
+from . import shop_category_api

@@ -16,6 +16,7 @@ class ProfileAPI(http.Controller):
     # -------------------------------------------------------------
     # GET /api/v1/profile  →  Return logged-in user profile
     # -------------------------------------------------------------
+
     @http.route('/api/v1/profile', type='http', auth='user', methods=['GET'], csrf=False, cors="*")
     def get_profile(self, **kwargs):
         user = request.env.user

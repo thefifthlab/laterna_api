@@ -194,6 +194,7 @@ class ProductAPI(http.Controller):
                 status=500,
                 headers={'Content-Type': 'application/json'},
             )
+
     def _get_product_price(self, product, pricelist):
         """Get product price considering pricelist rules"""
         # Use the product's list_price as fallback
@@ -372,8 +373,7 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False,
-                cors='*')
+    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
     def get_product_details(self, product_id, **kwargs):
         """
         Fetch detailed product info by ID.
@@ -447,10 +447,8 @@ class ProductAPI(http.Controller):
         except Exception as e:
             return request.make_json_response({'error': str(e)}, status=500)
 
-
-
     @http.route('/api/v1/products/by_subcategory',
-        type='json', auth='public', methods=['POST'], csrf=False, cors='*')
+                type='json', auth='public', methods=['POST'], csrf=False, cors='*')
     def get_products_by_parent_and_subcategory(self, **kwargs):
         """
         Fetch all products under a given parent category and subcategory.
