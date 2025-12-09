@@ -15,13 +15,7 @@ def slug(record):
 
 class ShopCategoryAPI(http.Controller):
 
-    @http.route(
-        '/api/shop/category',
-        type='http',
-        auth='public',
-        methods=['GET'],
-        csrf=False
-    )
+    @http.route('/api/shop/category', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
     def get_shop_category(self, **params):
         try:
             # Get params

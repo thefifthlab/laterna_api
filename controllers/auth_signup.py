@@ -20,7 +20,7 @@ class LaternaAuthenticationSignUp(http.Controller):
     # ================================
     # MAIN REGISTRATION ENDPOINT
     # ================================
-    @http.route('/api/v1/admin/auth/register', type='http', auth="public", csrf=False, methods=['POST'], cors="*", website=False)
+    @http.route('/api/v1/admin/auth/register', type='http', auth="public", csrf=False, methods=['POST'], cors="*")
     def register_user(self, **kwargs):
         """Secure admin user registration with full validation and proper HTTP responses"""
         ip_address = request.httprequest.environ.get('HTTP_X_FORWARDED_FOR',

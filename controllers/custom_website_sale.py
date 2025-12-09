@@ -7,15 +7,8 @@ from odoo.http import request
 
 class CustomWebsiteSale(WebsiteSale):
 
-    @http.route(
-        ['/shop/checkout'],
-        type='http',
-        auth="public",
-        website=True,
-        sitemap=False,
-        methods=['GET', 'POST'],
-        csrf=False                    # ← We disable built-in check
-    )
+    @http.route(['/shop/checkout'], type='http', auth="public", website=True, sitemap=False, methods=['GET', 'POST'],
+        csrf=False, cors="*")
     def checkout(self, **post):
         # Always let original Odoo logic run first
         response = super(CustomWebsiteSale, self).checkout(**post)

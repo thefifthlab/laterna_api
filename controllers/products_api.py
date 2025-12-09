@@ -7,9 +7,10 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
+
 class ProductAPI(http.Controller):
 
-    @http.route('/api/v1/products', type='json', auth='public', csrf=False, methods=['GET'], cors='*')
+    @http.route('/api/v1/products', type='json', auth='public', csrf=False, methods=['GET'], cors='*', )
     def list_products(self, **kwargs):
         """
         Public product catalogue endpoint.
@@ -62,7 +63,8 @@ class ProductAPI(http.Controller):
             # 5. Pricelist & website context
             # ------------------------------
             website = request.env['website'].get_current_website()
-            pricelist = website.pricelist_id or request.env['product.pricelist'].search([('active', '=', True)], limit=1)
+            pricelist = website.pricelist_id or request.env['product.pricelist'].search([('active', '=', True)],
+                                                                                        limit=1)
             base_url = request.env['ir.config_parameter'].sudo().get_param('web.base.url', default='').rstrip('/')
 
             # ------------------------------
@@ -87,11 +89,13 @@ class ProductAPI(http.Controller):
             for tmpl in products:
                 price = get_product_price(tmpl)
                 full_name = tmpl.display_name
-                categories = [c.display_name for c in tmpl.public_categ_ids.sorted('sequence')] if tmpl.public_categ_ids else []
+                categories = [c.display_name for c in
+                              tmpl.public_categ_ids.sorted('sequence')] if tmpl.public_categ_ids else []
                 primary_category = categories[0] if categories else ''
 
                 # Compute stock safely
-                stock_qty = sum(v.sudo().qty_available for v in tmpl.product_variant_ids) if tmpl.product_variant_ids else 0
+                stock_qty = sum(
+                    v.sudo().qty_available for v in tmpl.product_variant_ids) if tmpl.product_variant_ids else 0
                 in_stock = stock_qty > 0
 
                 product_list.append({
@@ -316,7 +320,7 @@ class ProductAPI(http.Controller):
             'website_url': product.website_url if hasattr(product, 'website_url') else False
         }
 
-    @http.route('/api/v1/products/assign', type='http', auth='user', methods=['POST'], csrf=False, cors='*')
+    @http.route('/api/v1/products/assign', type='json', auth='user', methods=['POST'], csrf=False, cors='*')
     def assign_products_to_category(self, **kwargs):
         """
         Assign products to a category/subcategory.
@@ -418,3 +422,203 @@ class ProductAPI(http.Controller):
             _logger.exception("Error fetching products by subcategory")
             return {'error': str(e)}
 
+    from odoo import http
+    from odoo.http import request, Response
+    import json
+    import math
+    from odoo.exceptions import AccessError, ValidationError  # Import AccessError and ValidationError
+    import logging
+
+    _logger = logging.getLogger(__name__)
+
+    class ProductAPI(http.Controller):
+
+        @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+        def list_products(self, **kwargs):
+            try:
+                # Parse query parameters
+                page = int(kwargs.get('page', 1))
+                limit = int(kwargs.get('limit', 20))
+                category_id = kwargs.get('category_id')
+                search = kwargs.get('search')
+                sort = kwargs.get('sort')
+
+                # Build domain for published products
+                domain = [('website_published', '=', True)]
+                if category_id:
+                    domain.append(('public_categ_ids', 'in', [int(category_id)]))
+                if search:
+                    domain.append(('name', 'ilike', search))
+
+                # Determine sort order
+                sort_order = 'id'
+                if sort == 'price_asc':
+                    sort_order = 'list_price asc'
+                elif sort == 'price_desc':
+                    sort_order = 'list_price desc'
+                elif sort == 'name_desc':
+                    sort_order = 'name desc'
+
+                # Search products
+                products = request.env['product.template'].sudo().search(
+                    domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+                )
+
+                # Get current website's pricelist for proper pricing
+                website = request.env['website'].get_current_website()
+                pricelist = website.pricelist_id
+
+                # Prepare response data
+                product_list = []
+                for product in products:
+                    # Get price using pricelist rules
+                    price = self._get_product_price(product, pricelist)
+
+                    product_list.append({
+                        'id': product.id,
+                        'name': product.name,
+                        'price': price,
+                        'description': product.description or '',
+                        'image_url': self._get_image_url(product),
+                        'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                    })
+
+                total_count = request.env['product.template'].sudo().search_count(domain)
+                total_pages = math.ceil(total_count / limit) if limit else 1
+
+                response = {
+                    "products": product_list,
+                    "total": total_count,
+                    "pages": total_pages
+                }
+
+                return Response(json.dumps(response), status=200, content_type='application/json')
+
+            except Exception as e:
+                error = {'error': str(e)}
+                return Response(json.dumps(error), status=500, content_type='application/json')
+
+        def _get_product_price(self, product, pricelist):
+            """Get product price considering pricelist rules"""
+            # Use the product's list_price as fallback
+            price = product.list_price
+
+            try:
+                # Try to get price from pricelist
+                price = pricelist.get_product_price(product, 1, False)
+            except Exception:
+                # If that fails, try a different approach
+                try:
+                    product_context = dict(request.env.context)
+                    product_context.update({
+                        'pricelist': pricelist.id,
+                        'quantity': 1
+                    })
+                    product = product.with_context(product_context)
+                    price = product.price
+                except Exception:
+                    # Fall back to list_price if all else fails
+                    pass
+
+            return price
+
+        def _get_image_url(self, product):
+            if product.image_1920:
+                base_url = request.httprequest.host_url.strip('/')
+                return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
+            return ''
+
+        @http.route('/api/v2/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+        def list_products(self, **kwargs):
+            try:
+                # Parse query parameters
+                page = int(kwargs.get('page', 1))
+                limit = int(kwargs.get('limit', 20))
+                category_id = kwargs.get('category_id')
+                search = kwargs.get('search')
+                sort = kwargs.get('sort')
+
+                # Build domain for published products
+                domain = [('website_published', '=', True)]
+                if category_id:
+                    domain.append(('public_categ_ids', 'in', [int(category_id)]))
+                if search:
+                    domain.append(('name', 'ilike', search))
+
+                # Determine sort order
+                sort_order = 'id'
+                if sort == 'price_asc':
+                    sort_order = 'list_price asc'
+                elif sort == 'price_desc':
+                    sort_order = 'list_price desc'
+                elif sort == 'name_desc':
+                    sort_order = 'name desc'
+
+                # Search products
+                products = request.env['product.template'].sudo().search(
+                    domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+                )
+
+                # Get current website's pricelist for proper pricing
+                website = request.env['website'].get_current_website()
+                pricelist = website.pricelist_id
+
+                # Prepare response data
+                product_list = []
+                for product in products:
+                    # Get price using pricelist rules
+                    price = self._get_product_price(product, pricelist)
+
+                    product_list.append({
+                        'id': product.id,
+                        'name': product.name,
+                        'price': price,
+                        'description': product.description or '',
+                        'image_url': self._get_image_url(product),
+                        'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                    })
+
+                total_count = request.env['product.template'].sudo().search_count(domain)
+                total_pages = math.ceil(total_count / limit) if limit else 1
+
+                response = {
+                    "products": product_list,
+                    "total": total_count,
+                    "pages": total_pages
+                }
+
+                return Response(json.dumps(response), status=200, content_type='application/json')
+
+            except Exception as e:
+                error = {'error': str(e)}
+                return Response(json.dumps(error), status=500, content_type='application/json')
+
+        def _get_product_price(self, product, pricelist):
+            """Get product price considering pricelist rules"""
+            # Use the product's list_price as fallback
+            price = product.list_price
+
+            try:
+                # Try to get price from pricelist
+                price = pricelist.get_product_price(product, 1, False)
+            except Exception:
+                # If that fails, try a different approach
+                try:
+                    product_context = dict(request.env.context)
+                    product_context.update({
+                        'pricelist': pricelist.id,
+                        'quantity': 1
+                    })
+                    product = product.with_context(product_context)
+                    price = product.price
+                except Exception:
+                    # Fall back to list_price if all else fails
+                    pass
+
+            return price
+
+        def _get_image_url(self, product):
+            if product.image_1920:
+                base_url = request.httprequest.host_url.strip('/')
+                return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
+            return ''
