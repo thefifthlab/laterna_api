@@ -13,5 +13,6 @@ from . import get_profile
 from . import website_sale_cart_api
 from . import custom_website_sale
 from . import shop_category_api
-from . import api_shop_checkout
 from . import product_api_old
+from . import dashboard_api
+from . import api_shop_checkout

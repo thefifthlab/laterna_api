@@ -283,8 +283,7 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False,
-                cors='*')
+    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
     def get_product_details(self, product_id, **kwargs):
         """
         Fetch detailed product info by ID.

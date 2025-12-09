@@ -1,75 +1,73 @@
 # -*- coding: utf-8 -*-
 from odoo import http
 from odoo.http import request
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
-class EcommerceDashboardAPI(http.Controller):
+class WebsiteCustomerDashboardAPI(http.Controller):
 
-    @http.route('/api/v1/dashboard', type='json', auth='user', methods=['POST'], csrf=False)
+    @http.route('/api/v1/dashboard', type='json', auth='user', methods=['POST'], csrf=False, cors="*")
     def get_dashboard(self, **kwargs):
         """
-        Returns ecommerce dashboard metrics:
-        - total carts
-        - total orders
-        - abandoned carts
-        - total revenue
-        - total products
+        Dashboard metrics for logged-in website customer:
+        - Their carts
+        - Their orders
+        - Their abandoned carts
+        - Total revenue (from their orders)
+        - Total products
         """
 
         try:
-            # === TOTAL PRODUCTS ===
-            total_products = request.env['product.product'].sudo().search_count([])
+            user = request.env.user
+            partner = user.partner_id
+            Sale = request.env['sale.order'].sudo()
 
-            # === ORDERS ===
-            orders = request.env['sale.order'].sudo()
-
-            total_orders = orders.search_count([
+            # --- Confirmed orders for this customer ---
+            user_orders = Sale.search([
+                ('partner_id', '=', partner.id),
                 ('state', 'in', ['sale', 'done'])
             ])
+            total_orders = len(user_orders)
+            total_revenue = sum(user_orders.mapped('amount_total'))
 
-            # === REVENUE ===
-            paid_orders = orders.search([
-                ('state', 'in', ['sale', 'done'])
-            ])
-            total_revenue = sum(paid_orders.mapped('amount_total'))
-
-            # === CARTS ===
-            all_carts = orders.search([
+            # --- Carts (draft website orders) ---
+            carts = Sale.search([
+                ('partner_id', '=', partner.id),
                 ('state', '=', 'draft'),
-                ('is_cart', '=', True)
+                ('website_id', '!=', False)
             ])
-            total_carts = len(all_carts)
+            total_carts = len(carts)
 
-            # === ABANDONED CARTS ===
-            abandoned_carts = all_carts.filtered(
-                lambda c: (datetime.now() - c.create_date).days >= 1
+            # --- Abandoned carts (older than 24 hours) ---
+            abandoned_carts = carts.filtered(
+                lambda c: c.create_date <= datetime.now() - timedelta(hours=24)
             )
             total_abandoned = len(abandoned_carts)
 
-            # === RESPONSE PAYLOAD ===
-            data = {
-                "metrics": {
-                    "total_carts": total_carts,
-                    "total_orders": total_orders,
-                    "abandoned_carts": total_abandoned,
-                    "total_revenue": total_revenue,
-                    "total_products": total_products,
-                },
+            # --- Total products (all visible products) ---
+            total_products = request.env['product.product'].sudo().search_count([])
 
-                "latest_orders": [{
-                    "id": o.id,
-                    "name": o.name,
-                    "customer": o.partner_id.name,
-                    "amount_total": o.amount_total,
-                    "state": o.state,
-                    "date_order": o.date_order,
-                } for o in orders.search([], order="id desc", limit=10)]
-            }
+            # --- Latest 10 orders ---
+            latest_orders = [{
+                "id": o.id,
+                "name": o.name,
+                "amount_total": o.amount_total,
+                "state": o.state,
+                "date_order": o.date_order,
+            } for o in user_orders.sorted(key=lambda x: x.id, reverse=True)[:10]]
 
             return {
                 "status": "success",
-                "data": data
+                "data": {
+                    "user": user.name,
+                    "metrics": {
+                        "total_carts": total_carts,
+                        "total_orders": total_orders,
+                        "abandoned_carts": total_abandoned,
+                        "total_revenue": total_revenue,
+                        "total_products": total_products,
+                    },
+                    "latest_orders": latest_orders
+                }
             }
 
         except Exception as e:

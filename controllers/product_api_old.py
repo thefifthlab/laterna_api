@@ -373,41 +373,6 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['GET'], csrf=False, cors='*')
-    def get_product_details(self, product_id, **kwargs):
-        """
-        Fetch detailed product info by ID.
-        - product_id: ID of product.template.
-        - Returns: Dict with name, price, variants (e.g., legs: steel/aluminum), images, etc.
-        """
-        product = request.env['product.template'].sudo().browse(product_id)
-        if not product.exists():
-            return {'error': 'Product not found'}
-
-        # Fetch variants/attributes (e.g., legs material, color)
-        attributes = []
-        for attr_line in product.attribute_line_ids:
-            attr_values = [{'id': v.id, 'name': v.name} for v in attr_line.value_ids]
-            attributes.append({
-                'attribute': attr_line.attribute_id.name,  # e.g., 'Legs', 'Color'
-                'values': attr_values,  # e.g., [{'id':1, 'name':'Steel'}, {'id':2, 'name':'Aluminum'}]
-                'price_extra': attr_line.value_price_extra  # e.g., +$50.40 for Aluminum
-            })
-
-        # Base price and image
-        image_url = '/web/image/product.template/%s/image_1920' % product_id if product.image_1920 else False
-
-        return {
-            'id': product.id,
-            'name': product.name,  # e.g., 'Customizable Desk'
-            'base_price': product.list_price,  # e.g., 750.00
-            'description': product.description_sale,
-            'image_url': image_url,
-            'attributes': attributes,  # Customizable options
-            'in_stock': product.qty_available > 0,
-            'out_of_stock_message': product.out_of_stock_message,
-            'website_url': product.website_url if hasattr(product, 'website_url') else False
-        }
 
     @http.route('/api/v1/products/assign', type='http', auth='user', methods=['POST'], csrf=False, cors='*')
     def assign_products_to_category(self, **kwargs):
