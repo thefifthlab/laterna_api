@@ -17,32 +17,62 @@ class ProfileAPI(http.Controller):
     # GET /api/v1/profile  →  Return logged-in user profile
     # -------------------------------------------------------------
 
-    @http.route('/api/v1/profile', type='http', auth='user', methods=['GET'], csrf=False, cors="*")
+    @http.route('/api/v1/profile', type='json', auth='user', methods=['GET'], csrf=False, cors="*")
     def get_profile(self, **kwargs):
-        user = request.env.user
-        profile = {
-            "id": user.id,
-            "name": user.name,
-            "login": user.login,
-            "email": user.email or False,
-            "phone": user.phone or False,
-            "mobile": user.mobile or False,
-            "image_1920": user.image_1920.decode() if user.image_1920 else False,
-            "partner": {
-                "street": user.partner_id.street or False,
-                "street2": user.partner_id.street2 or False,
-                "city": user.partner_id.city or False,
-                "zip": user.partner_id.zip or False,
-                "country": user.partner_id.country_id.name or False,
-                "state": user.partner_id.state_id.name or False,
+        try:
+            user = request.env.user
+
+            # Safely get country name
+            country_name = False
+            if user.partner_id.country_id:
+                country_name = user.partner_id.country_id.name
+
+            # Safely get state/province name
+            state_name = False
+            if user.partner_id.state_id:
+                state_name = user.partner_id.state_id.name
+
+            profile = {
+                "id": user.id,
+                "name": user.name,
+                "login": user.login,
+                "email": user.email or False,
+                "phone": user.phone or False,
+                "mobile": user.mobile or False,
+                "image_1920": user.image_1920 if user.image_1920 else False,
+                "partner": {
+                    "street": user.partner_id.street or False,
+                    "street2": user.partner_id.street2 or False,
+                    "city": user.partner_id.city or False,
+                    "zip": user.partner_id.zip or False,
+                    "country": country_name,
+                    "state": state_name,
+                    "partner_id": user.partner_id.id,
+                }
             }
-        }
 
-        return request.make_response(
-            json.dumps(profile),
-            headers=[('Content-Type', 'application/json')]
-        )
+            return request.make_response(
+                json.dumps({
+                    "success": True,
+                    "profile": profile
+                }),
+                headers=[('Content-Type', 'application/json')],
+                status=200
+            )
 
+        except Exception as e:
+            import logging
+            _logger = logging.getLogger(__name__)
+            _logger.error(f"Failed to get user profile: {str(e)}")
+            return request.make_response(
+                json.dumps({
+                    "success": False,
+                    "error": "Failed to get user profile",
+                    "message": str(e)
+                }),
+                headers=[('Content-Type', 'application/json')],
+                status=500
+            )
     # -------------------------------------------------------------
     # PUT/PATCH /api/v1/update/profile  →  Update user profile
     # -------------------------------------------------------------
