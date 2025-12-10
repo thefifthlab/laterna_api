@@ -5,7 +5,6 @@ import re
 from odoo import http, fields
 from odoo.http import request
 from odoo.exceptions import ValidationError, AccessError
-from werkzeug.wrappers import Response
 import json
 
 _logger = logging.getLogger(__name__)
@@ -31,7 +30,7 @@ class InternalUserRegistration(http.Controller):
 
     @http.route("/api/v1/admin/auth/register",
                 type="http",
-                auth="public",
+                auth="user",
                 methods=["POST"],
                 csrf=False,
                 cors="*")
@@ -43,6 +42,10 @@ class InternalUserRegistration(http.Controller):
         Optional: phone, department, job_position, employee_id
         """
         try:
+            # Check if current user has admin access
+            if not request.env.user.has_group('base.group_system'):
+                return self._json_error("Admin access required to register internal users", 403)
+
             # 1. Check content type
             if request.httprequest.mimetype != 'application/json':
                 return self._json_error("Content-Type must be application/json", 415)
@@ -226,7 +229,7 @@ class InternalUserRegistration(http.Controller):
                     "email": user.email,
                     "login": user.login,
                     "is_internal": True,
-                    "groups": [g.name for g in user.groups_id],
+                    # "groups": [g.name for g in user.groups_id],
                 },
                 "timestamp": fields.Datetime.now().isoformat(),
             }
@@ -288,108 +291,3 @@ class InternalUserRegistration(http.Controller):
             "error": error_msg,
             "status": status
         }, status=status)
-
-
-# Alternative: Simple version for basic internal user creation
-class SimpleInternalRegistration(http.Controller):
-
-    @http.route("/api/v1/internal/register/simple",
-                type="http",
-                auth="public",
-                methods=["POST"],
-                csrf=False,
-                cors="*")
-    def register_internal_simple(self, **kwargs):
-        """Simple version for internal user registration"""
-
-        try:
-            # Get request data
-            request_data = request.httprequest.get_data().decode('utf-8')
-            data = json.loads(request_data) if request_data else {}
-
-            # Basic validation
-            if not all(k in data for k in ['email', 'password', 'name']):
-                return Response(
-                    json.dumps({
-                        "success": False,
-                        "error": "Missing required fields: email, password, name"
-                    }),
-                    status=400,
-                    content_type='application/json'
-                )
-
-            email = data['email'].strip().lower()
-            name = data['name'].strip()
-
-            # Check duplicate
-            if request.env["res.users"].sudo().search([("login", "=", email)], limit=1):
-                return Response(
-                    json.dumps({
-                        "success": False,
-                        "error": "Email already registered"
-                    }),
-                    status=409,
-                    content_type='application/json'
-                )
-
-            # Create internal user
-            partner = request.env["res.partner"].sudo().create({
-                "name": name,
-                "email": email,
-                "company_type": "person",
-            })
-
-            # Get employee group
-            employee_group = request.env.ref("base.group_user")
-
-            user = request.env["res.users"].sudo().with_context(
-                no_reset_password=True
-            ).create({
-                "name": name,
-                "login": email,
-                "password": data['password'],
-                "partner_id": partner.id,
-                "groups_id": [(6, 0, [employee_group.id])],
-                "active": True,
-            })
-
-            # Optional: Create employee record
-            try:
-                request.env["hr.employee"].sudo().create({
-                    "name": name,
-                    "work_email": email,
-                    "user_id": user.id,
-                    "address_home_id": partner.id,
-                })
-            except:
-                pass  # Skip if HR module not installed or fails
-
-            return Response(
-                json.dumps({
-                    "success": True,
-                    "message": "Internal user created successfully",
-                    "user_id": user.id,
-                    "login": user.login,
-                }),
-                status=201,
-                content_type='application/json'
-            )
-
-        except json.JSONDecodeError:
-            return Response(
-                json.dumps({
-                    "success": False,
-                    "error": "Invalid JSON"
-                }),
-                status=400,
-                content_type='application/json'
-            )
-        except Exception as e:
-            return Response(
-                json.dumps({
-                    "success": False,
-                    "error": str(e)
-                }),
-                status=500,
-                content_type='application/json'
-            )
