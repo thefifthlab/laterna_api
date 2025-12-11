@@ -46,6 +46,13 @@ class WebsiteCustomerDashboardAPI(http.Controller):
             # --- Total products (all visible products) ---
             total_products = request.env['product.product'].sudo().search_count([])
 
+            # Total number of orders
+            total_orders = len(user_orders)
+
+            # Total revenue from all confirmed orders
+            total_order_amount = sum(user_orders.mapped('amount_total'))
+
+
             # --- Latest 10 orders ---
             latest_orders = [{
                 "id": o.id,
@@ -64,7 +71,8 @@ class WebsiteCustomerDashboardAPI(http.Controller):
                         "total_orders": total_orders,
                         "abandoned_carts": total_abandoned,
                         "total_revenue": total_revenue,
-                        "total_products": total_products,
+                        # "total_products": total_products,
+                        "total_order_amount": total_order_amount,
                     },
                     "latest_orders": latest_orders
                 }

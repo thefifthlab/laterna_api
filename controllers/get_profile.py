@@ -32,6 +32,14 @@ class ProfileAPI(http.Controller):
             if user.partner_id.state_id:
                 state_name = user.partner_id.state_id.name
 
+            # Handle image_1920 - it's binary, needs special handling
+            image_1920 = False
+            if user.image_1920:
+                try:
+                    image_1920 = user.image_1920.decode('utf-8')
+                except:
+                    image_1920 = base64.b64encode(user.image_1920).decode('utf-8')
+
             profile = {
                 "id": user.id,
                 "name": user.name,
@@ -39,7 +47,7 @@ class ProfileAPI(http.Controller):
                 "email": user.email or False,
                 "phone": user.phone or False,
                 "mobile": user.mobile or False,
-                "image_1920": user.image_1920 if user.image_1920 else False,
+                "image_1920": image_1920,
                 "partner": {
                     "street": user.partner_id.street or False,
                     "street2": user.partner_id.street2 or False,
@@ -51,28 +59,18 @@ class ProfileAPI(http.Controller):
                 }
             }
 
-            return request.make_response(
-                json.dumps({
-                    "success": True,
-                    "profile": profile
-                }),
-                headers=[('Content-Type', 'application/json')],
-                status=200
-            )
+            return {
+                "success": True,
+                "profile": profile
+            }
 
         except Exception as e:
-            import logging
-            _logger = logging.getLogger(__name__)
             _logger.error(f"Failed to get user profile: {str(e)}")
-            return request.make_response(
-                json.dumps({
-                    "success": False,
-                    "error": "Failed to get user profile",
-                    "message": str(e)
-                }),
-                headers=[('Content-Type', 'application/json')],
-                status=500
-            )
+            return {
+                "success": False,
+                "error": "Failed to get user profile",
+                "message": str(e)
+            }
     # -------------------------------------------------------------
     # PUT/PATCH /api/v1/update/profile  →  Update user profile
     # -------------------------------------------------------------
