@@ -6,7 +6,6 @@ import logging
 from odoo import http
 from odoo.http import request, Response
 from odoo.exceptions import AccessDenied, ValidationError
-import jwt
 
 _logger = logging.getLogger(__name__)
 
@@ -17,28 +16,32 @@ class ProfileAPI(http.Controller):
     # GET /api/v1/profile  →  Return logged-in user profile
     # -------------------------------------------------------------
 
-    @http.route('/api/v1/profile', type='json', auth='user', methods=['GET'], csrf=False, cors="*")
-    def get_profile(self, **kwargs):
+    @http.route('/api/v1/profile', type='http', auth='user', methods=['GET'], csrf=False, cors="*")
+    def get_profile_http(self, **kwargs):
+        """Handle both GET and OPTIONS requests"""
+
+        # Handle OPTIONS preflight
+        if request.httprequest.method == 'OPTIONS':
+            headers = {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'Access-Control-Allow-Headers': 'Origin, Content-Type, Accept, Authorization, X-Requested-With',
+                'Access-Control-Allow-Credentials': 'true',
+                'Access-Control-Max-Age': '86400',
+            }
+            return request.make_response('', headers)
+
+        # Handle GET request
         try:
             user = request.env.user
 
-            # Safely get country name
-            country_name = False
-            if user.partner_id.country_id:
-                country_name = user.partner_id.country_id.name
+            # Build profile data (same as before)
+            country_name = user.partner_id.country_id.name if user.partner_id.country_id else False
+            state_name = user.partner_id.state_id.name if user.partner_id.state_id else False
 
-            # Safely get state/province name
-            state_name = False
-            if user.partner_id.state_id:
-                state_name = user.partner_id.state_id.name
-
-            # Handle image_1920 - it's binary, needs special handling
             image_1920 = False
             if user.image_1920:
-                try:
-                    image_1920 = user.image_1920.decode('utf-8')
-                except:
-                    image_1920 = base64.b64encode(user.image_1920).decode('utf-8')
+                image_1920 = user.image_1920.decode('utf-8') if isinstance(user.image_1920, bytes) else user.image_1920
 
             profile = {
                 "id": user.id,
@@ -59,18 +62,39 @@ class ProfileAPI(http.Controller):
                 }
             }
 
-            return {
+            response_data = {
                 "success": True,
                 "profile": profile
             }
 
+            # Return JSON response with CORS headers
+            headers = {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+            }
+
+            return request.make_response(
+                json.dumps(response_data),
+                headers=headers
+            )
+
         except Exception as e:
-            _logger.error(f"Failed to get user profile: {str(e)}")
-            return {
+            _logger.error("Failed to get user profile: %s", str(e))
+            error_response = {
                 "success": False,
                 "error": "Failed to get user profile",
                 "message": str(e)
             }
+            headers = {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+            }
+            return request.make_response(
+                json.dumps(error_response),
+                headers=headers,
+                status=500
+            )
+
     # -------------------------------------------------------------
     # PUT/PATCH /api/v1/update/profile  →  Update user profile
     # -------------------------------------------------------------
@@ -119,82 +143,7 @@ class ProfileAPI(http.Controller):
     # -------------------------------------------------------------
     # POST /api/v1/profile/change-password  →  Change password
     # -------------------------------------------------------------
-    def _validate_jwt_token(self, token):
-        """Validate JWT token and return user_id or False"""
-        secret = request.env['ir.config_parameter'].sudo().get_param('auth_token.secret_key')
-        if not secret:
-            return False
 
-        try:
-            payload = jwt.decode(token, secret, algorithms=['HS256'])
-            user_id = payload.get('user_id')
-            if not user_id:
-                return False
-            # Optional: check expiration is handled by jwt.decode
-            return user_id
-        except jwt.ExpiredSignatureError:
-            return False
-        except jwt.InvalidTokenError:
-            return False
-
-    def _authenticate_by_token(self):
-        """Extract and validate Bearer token from Authorization header"""
-        auth_header = request.httprequest.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return False
-
-        token = auth_header.split(' ')[1]
-        user_id = self._validate_jwt_token(token)
-        if not user_id:
-            return False
-
-        # Set environment with authenticated user
-        request.uid = user_id
-        request.env = request.env(user=user_id)
-        return user_id
-
-    def _strong_password(self, password):
-        """Enforce strong password policy"""
-        if len(password) < 8:
-            return False, "Password must be at least 8 characters long"
-        if not re.search(r"[A-Z]", password):
-            return False, "Password must contain at least one uppercase letter"
-        if not re.search(r"[a-z]", password):
-            return False, "Password must contain at least one lowercase letter"
-        if not re.search(r"[0-9]", password):
-            return False, "Password must contain at least one digit"
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
-            return False, "Password must contain at least one special character"
-        return True, ""
-
-
-    def _authenticate_by_token(self):
-        """Extract Bearer token and authenticate user (Odoo 17/18 compatible)"""
-        auth_header = request.httprequest.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return False
-
-        token = auth_header.split(' ', 1)[1].strip()
-        secret = request.env['ir.config_parameter'].sudo().get_param('auth_token.secret_key')
-        if not secret:
-            return False
-
-        try:
-            payload = jwt.decode(token, secret, algorithms=['HS256'])
-            user_id = int(payload['user_id'])
-
-            # Critical: Use update_env() instead of request.uid =
-            request.update_env(user=user_id)
-
-            # Optional: re-check that user exists and is active
-            user = request.env['res.users'].browse(user_id)
-            if not user.exists() or not user.active:
-                return False
-
-            return user_id
-
-        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, ValueError, KeyError):
-            return False
 
 
     @http.route('/api/v1/profile/change-password', type='json', auth='none', methods=['POST'], csrf=False, cors="*")
