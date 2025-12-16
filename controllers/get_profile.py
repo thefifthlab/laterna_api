@@ -1,11 +1,12 @@
 import json
 import base64
-import re
-import time, datetime
 import logging
+import datetime
+import jwt
+
 from odoo import http
-from odoo.http import request, Response
-from odoo.exceptions import AccessDenied, ValidationError
+from odoo.http import request
+from odoo.exceptions import AccessDenied
 
 _logger = logging.getLogger(__name__)
 
@@ -13,56 +14,117 @@ _logger = logging.getLogger(__name__)
 class ProfileAPI(http.Controller):
 
     # -------------------------------------------------------------
-    # GET /api/v1/profile  →  Return logged-in user profile
+    # POST /api/v1/profile → Return logged-in user profile
     # -------------------------------------------------------------
-
-    @http.route('/api/v1/profile', type='json', auth='user', methods=['GET'], csrf=False, cors="*")
-    def get_profile_http(self, **kwargs):
+    @http.route('/api/v1/profile', type='json', auth='none', methods=['POST'], csrf=False)
+    def get_profile_jsonrpc(self, **kwargs):
         try:
-            user = request.env.user
+            user = self._authenticate_bearer()
 
-            # Build profile data (same as before)
-            country_name = user.partner_id.country_id.name if user.partner_id.country_id else False
-            state_name = user.partner_id.state_id.name if user.partner_id.state_id else False
+            profile = self._build_profile(user)
 
-            image_1920 = False
-            if user.image_1920:
-                image_1920 = user.image_1920.decode('utf-8') if isinstance(user.image_1920, bytes) else user.image_1920
-
-            profile = {
-                "id": user.id,
-                "name": user.name,
-                "login": user.login,
-                "email": user.email or False,
-                "phone": user.phone or False,
-                "mobile": user.mobile or False,
-                "image_1920": image_1920,
-                "partner": {
-                    "street": user.partner_id.street or False,
-                    "street2": user.partner_id.street2 or False,
-                    "city": user.partner_id.city or False,
-                    "zip": user.partner_id.zip or False,
-                    "country": country_name,
-                    "state": state_name,
-                    "partner_id": user.partner_id.id,
-                }
+            return {
+                "jsonrpc": "2.0",
+                "result": {
+                    "success": True,
+                    "profile": profile
+                },
+                "id": None
             }
 
-            response_data = {
-                "success": True,
-                "profile": profile
+        except AccessDenied as e:
+            return {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": 401,
+                    "message": "Unauthorized",
+                    "data": str(e)
+                },
+                "id": None
             }
-
-            return response_data
 
         except Exception as e:
-            _logger.error("Failed to get user profile: %s", str(e))
-            error_response = {
-                "success": False,
-                "error": "Failed to get user profile",
-                "message": str(e)
+            _logger.exception("Profile API error")
+            return {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": str(e)
+                },
+                "id": None
             }
-            return error_response
+
+    # -------------------------------------------------------------
+    # Bearer Token Authentication
+    # -------------------------------------------------------------
+    def _authenticate_bearer(self):
+        auth_header = request.httprequest.headers.get('Authorization')
+
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise AccessDenied("Bearer token missing")
+
+        token = auth_header.split(' ')[1]
+
+        secret_key = request.env['ir.config_parameter'].sudo().get_param(
+            'auth_token.secret_key'
+        )
+        if not secret_key:
+            raise AccessDenied("Server misconfiguration")
+
+        try:
+            payload = jwt.decode(
+                token,
+                secret_key,
+                algorithms=['HS256']
+            )
+        except jwt.ExpiredSignatureError:
+            raise AccessDenied("Token expired")
+        except jwt.InvalidTokenError:
+            raise AccessDenied("Invalid token")
+
+        user_id = payload.get('user_id')
+        if not user_id:
+            raise AccessDenied("Invalid token payload")
+
+        user = request.env['res.users'].sudo().browse(user_id)
+        if not user.exists():
+            raise AccessDenied("User not found")
+
+        return user
+
+    # -------------------------------------------------------------
+    # Build Profile Payload
+    # -------------------------------------------------------------
+    def _build_profile(self, user):
+        partner = user.partner_id
+
+        image_1920 = False
+        if user.image_1920:
+            image_1920 = (
+                user.image_1920.decode('utf-8')
+                if isinstance(user.image_1920, bytes)
+                else user.image_1920
+            )
+
+        return {
+            "id": user.id,
+            "name": user.name,
+            "login": user.login,
+            "email": user.email or False,
+            "phone": user.phone or False,
+            "mobile": user.mobile or False,
+            "image_1920": image_1920,
+            "partner": {
+                "partner_id": partner.id,
+                "street": partner.street or False,
+                "street2": partner.street2 or False,
+                "city": partner.city or False,
+                "zip": partner.zip or False,
+                "state": partner.state_id.name if partner.state_id else False,
+                "country": partner.country_id.name if partner.country_id else False,
+            }
+        }
 
     # -------------------------------------------------------------
     # PUT/PATCH /api/v1/update/profile  →  Update user profile
