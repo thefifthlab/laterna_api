@@ -16,22 +16,8 @@ class ProfileAPI(http.Controller):
     # GET /api/v1/profile  →  Return logged-in user profile
     # -------------------------------------------------------------
 
-    @http.route('/api/v1/profile', type='http', auth='user', methods=['GET'], csrf=False, cors="*")
+    @http.route('/api/v1/profile', type='json', auth='user', methods=['GET'], csrf=False, cors="*")
     def get_profile_http(self, **kwargs):
-        """Handle both GET and OPTIONS requests"""
-
-        # Handle OPTIONS preflight
-        if request.httprequest.method == 'OPTIONS':
-            headers = {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers': 'Origin, Content-Type, Accept, Authorization, X-Requested-With',
-                'Access-Control-Allow-Credentials': 'true',
-                'Access-Control-Max-Age': '86400',
-            }
-            return request.make_response('', headers)
-
-        # Handle GET request
         try:
             user = request.env.user
 
@@ -67,16 +53,7 @@ class ProfileAPI(http.Controller):
                 "profile": profile
             }
 
-            # Return JSON response with CORS headers
-            headers = {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            }
-
-            return request.make_response(
-                json.dumps(response_data),
-                headers=headers
-            )
+            return response_data
 
         except Exception as e:
             _logger.error("Failed to get user profile: %s", str(e))
@@ -85,15 +62,7 @@ class ProfileAPI(http.Controller):
                 "error": "Failed to get user profile",
                 "message": str(e)
             }
-            headers = {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            }
-            return request.make_response(
-                json.dumps(error_response),
-                headers=headers,
-                status=500
-            )
+            return error_response
 
     # -------------------------------------------------------------
     # PUT/PATCH /api/v1/update/profile  →  Update user profile
