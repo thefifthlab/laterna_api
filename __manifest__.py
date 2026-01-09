@@ -20,11 +20,11 @@
         'security/ir.model.access.csv',
         'views/nigeria_states.xml',
         'views/mail_template_data.xml',
-        #'views/product_public_category_views.xml',
+        'views/onestep_checkout_templates.xml',
+        # 'views/product_public_category_views.xml',
     ],
     # only loaded in demonstration mode
     'demo': [
-        #'demo/demo.xml',
+        # 'demo/demo.xml',
     ],
 }
-

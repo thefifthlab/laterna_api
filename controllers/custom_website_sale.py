@@ -25,7 +25,7 @@ class CustomWebsiteSale(WebsiteSale):
         if request.httprequest.method == 'POST':
             submitted_token = request.params.get('csrf_token')
             if not submitted_token or not request.validate_csrf(submitted_token):
-                return request.redirect('/shop/cart?csrf_error=1')
+                return request.redirect('/api/v1/cart/add?csrf_error=1')
             return super(WebsiteSale, self).shop(**post)
 
         return super(WebsiteSale, self).shop(**post)
