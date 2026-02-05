@@ -471,8 +471,13 @@ class ProductAPI(http.Controller):
                 product_list = []
                 for product in products:
                     # Get price using pricelist rules
-                    price = self._get_product_price(product, pricelist)
-
+                    price, rule = pricelist._get_product_price_rule(
+                        product,
+                        quantity=qty or 1.0,
+                        partner=partner,
+                        date=False,  # or datetime if needed
+                        uom_id=False  # or the uom
+                    )
                     product_list.append({
                         'id': product.id,
                         'name': product.name,

@@ -17,3 +17,5 @@ from . import product_api_old
 from . import dashboard_api
 from . import api_shop_checkout
 from . import user_api_controller
+from . import checkout_api
+

@@ -1,194 +1,209 @@
-from odoo import http
+# -*- coding: utf-8 -*-
+from odoo import http, _
 from odoo.http import request
 import json
+import logging
+
+_logger = logging.getLogger(__name__)
 
 
-class CheckoutAPI(http.Controller):
+class OneStepCheckout(http.Controller):
 
-    # ------------------------------
-    # Helper to return JSON
-    # ------------------------------
-    def _json(self, data, status=200):
-        return request.make_response(
-            json.dumps(data),
-            headers={"Content-Type": "application/json"},
-            status=status
-        )
+    @http.route(
+        ['/api/v1/checkout'],
+        type='http',
+        auth="public",
+        website=True,
+        csrf=False,
+        methods=['POST'],
+        cors="*"
+    )
+    def one_step_submit(self, **kwargs):
+        """
+        One-step checkout API – now correctly handles JSON body.
 
-    # ------------------------------
-    # 1. Add product to cart
-    # ------------------------------
-    @http.route('/api/checkout/cart', type='json', auth='none', methods=['POST'], csrf=False)
-    def add_to_cart(self, **kw):
+        Frontend must send:
+        Content-Type: application/json
+        body: JSON.stringify({ name, email, street, city, country_id, ... })
+
+        Returns JSON response with redirect to payment on success.
+        """
+        order = request.website.sale_get_order(force_create=False)
+
+        if not order or not order.order_line:
+            return request.make_response(
+                json.dumps({'status': 'error', 'message': 'Cart is empty'}),
+                headers=[('Content-Type', 'application/json')],
+                status=400
+            )
+
+        # ────────────────────────────────────────────────
+        # IMPORTANT: Read and parse JSON body correctly
+        # ────────────────────────────────────────────────
+        payload = {}
+        if request.httprequest.data:
+            try:
+                payload = json.loads(request.httprequest.data.decode('utf-8'))
+            except json.JSONDecodeError:
+                return request.make_response(
+                    json.dumps({'status': 'error', 'message': 'Invalid JSON in request body'}),
+                    headers=[('Content-Type', 'application/json')],
+                    status=400
+                )
+
+        # Merge any query-string params + JSON body (most important part)
+        post = {**dict(request.params), **payload}
+
+        # Debug helper (remove in production if you want)
+        _logger.info("Checkout API received keys: %s", list(post.keys()))
+
         try:
-            # API key check
-            auth_error = self._check_api_key()
-            if auth_error:
-                return auth_error
+            # ────────────────────────────────────────────────
+            # 1. Required fields validation
+            # ────────────────────────────────────────────────
+            required_fields = ['name', 'email', 'street', 'city', 'country_id']
+            missing = [f for f in required_fields if not post.get(f)]
 
-            data = request.jsonrequest or {}
-            product_id = data.get('product_id')
-            quantity = data.get('quantity', 1)
-            partner_id = data.get('partner_id')
-            email = data.get('email')
+            if missing:
+                return request.make_response(
+                    json.dumps({
+                        'status': 'error',
+                        'message': f"Missing required field(s): {', '.join(missing)}",
+                        'received_keys': list(post.keys())   # helps debugging
+                    }),
+                    headers=[('Content-Type', 'application/json')],
+                    status=400
+                )
 
-            if not product_id:
-                return self._json({'error': 'Product ID is required'}, 400)
+            # Light email validation
+            email = str(post.get('email', '')).strip()
+            if '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
+                return request.make_response(
+                    json.dumps({'status': 'error', 'message': 'Invalid email format'}),
+                    headers=[('Content-Type', 'application/json')],
+                    status=400
+                )
 
-            # Create or get cart
-            order = request.env['sale.order'].sudo().create_cart(partner_id=partner_id)
+            # ────────────────────────────────────────────────
+            # 2. Prepare address data
+            # ────────────────────────────────────────────────
+            addr_values = {
+                'name': str(post.get('name', '')).strip(),
+                'email': email,
+                'street': str(post.get('street', '')).strip(),
+                'city': str(post.get('city', '')).strip(),
+                'zip': str(post.get('zip', '')).strip(),
+                'country_id': int(post.get('country_id')),
+                'state_id': int(post.get('state_id')) if post.get('state_id') else False,
+                'phone': str(post.get('phone', '')).strip(),
+            }
 
-            if not partner_id and email:
-                order.partner_id.email = email
+            # ────────────────────────────────────────────────
+            # 3. Update partner
+            # ────────────────────────────────────────────────
+            partner = order.partner_id
+            partner.sudo().write(addr_values)
 
-            # Add item
-            order.add_product_to_cart(product_id, quantity)
+            # (Optional safer version for logged-in users – uncomment if needed)
+            # if partner.user_ids:
+            #     delivery_partner = partner.sudo().copy({
+            #         **addr_values,
+            #         'parent_id': partner.id,
+            #         'type': 'delivery',
+            #     })
+            #     order.sudo().write({
+            #         'partner_shipping_id': delivery_partner.id,
+            #         # 'partner_invoice_id': delivery_partner.id or partner.id
+            #     })
 
-            # Prepare return items
-            totals = order._get_totals()
-            items = [{
-                'id': l.id,
-                'name': l.product_id.name,
-                'qty': l.product_uom_qty,
-                'price': l.price_unit,
-            } for l in order.order_line]
+            # ────────────────────────────────────────────────
+            # 4. Carrier selection
+            # ────────────────────────────────────────────────
+            carrier = False
+            carrier_name = None
+            delivery_amount = 0.0
 
-            return self._json({
-                'success': True,
-                'cart_id': order.id,
-                'user_type': 'guest' if not partner_id else 'partner',
-                'items': items,
-                **totals
-            })
+            carrier_id_str = post.get('carrier_id')
+            if carrier_id_str:
+                try:
+                    carrier_id = int(carrier_id_str)
+                    carrier = request.env['delivery.carrier'].sudo().browse(carrier_id)
+                    if carrier.exists():
+                        order._check_carrier_quotation(carrier)
+                        order._compute_amounts()
+                        carrier_name = carrier.name
+                        delivery_amount = order.amount_delivery
+                except Exception as carrier_err:
+                    _logger.warning("Carrier failed: %s", str(carrier_err))
+
+            # ────────────────────────────────────────────────
+            # 5. Response
+            # ────────────────────────────────────────────────
+            response_data = {
+                'status': 'success',
+                'order_id': order.id,
+                'amount_untaxed': round(order.amount_untaxed, 2),
+                'amount_tax': round(order.amount_tax, 2),
+                'amount_delivery': round(delivery_amount, 2),
+                'amount_total': round(order.amount_total, 2),
+                'currency': order.currency_id.name,
+                'currency_symbol': order.currency_id.symbol,
+                'carrier_name': carrier_name,
+                'carrier_id': carrier.id if carrier else None,
+                'items_count': len(order.order_line),
+                'redirect_url': '/shop/payment',
+            }
+
+            return request.make_response(
+                json.dumps(response_data, default=str),
+                headers=[('Content-Type', 'application/json')]
+            )
 
         except Exception as e:
-            return self._json({'error': str(e)}, 400)
+            _logger.exception("One-step checkout failed – order %s", order.id)
+            return request.make_response(
+                json.dumps({
+                    'status': 'error',
+                    'message': 'Server error during checkout. Please try again.',
+                    'detail': str(e) if request.env.user.has_group('base.group_system') else None
+                }),
+                headers=[('Content-Type', 'application/json')],
+                status=500
+            )
 
-    # ------------------------------
-    # 2. Get Cart Details
-    # ------------------------------
-    @http.route('/api/checkout/cart/<int:cart_id>', type='http', auth='none', methods=['GET'], csrf=False)
-    def get_cart(self, cart_id):
+
+    @http.route(
+        '/shop/checkout/update_carrier',
+        type='json',
+        auth="public",
+        website=True,
+        methods=['POST']
+    )
+    def update_carrier_json(self, carrier_id=None):
+        """AJAX helper – update carrier and return new totals"""
+        order = request.website.sale_get_order()
+        if not order:
+            return {'status': 'error', 'message': 'No active order'}
+
         try:
-            auth_error = self._check_api_key()
-            if auth_error:
-                return auth_error
+            if not carrier_id:
+                return {'status': 'error', 'message': 'carrier_id required'}
 
-            order = request.env['sale.order'].sudo().browse(cart_id)
-            if not order.exists():
-                return self._json({'error': 'Cart not found'}, 404)
+            carrier = request.env['delivery.carrier'].sudo().browse(int(carrier_id))
+            if not carrier.exists():
+                return {'status': 'error', 'message': 'Invalid carrier'}
 
-            totals = order._get_totals()
-            items = [{
-                'id': l.id,
-                'name': l.product_id.name,
-                'qty': l.product_uom_qty,
-                'subtotal': l.price_subtotal,
-            } for l in order.order_line]
+            order._check_carrier_quotation(carrier)
+            order._compute_amounts()
 
-            partner_name = order.partner_id.name or ""
-            user_type = 'guest' if partner_name.startswith('Guest_') else 'partner'
-
-            return self._json({
-                'success': True,
-                'cart_id': cart_id,
-                'user_type': user_type,
-                'items': items,
-                **totals
-            })
-
+            return {
+                'status': 'success',
+                'amount_total': round(order.amount_total, 2),
+                'amount_delivery': round(order.amount_delivery, 2),
+                'currency': order.currency_id.name,
+                'currency_symbol': order.currency_id.symbol,
+                'carrier_name': carrier.name
+            }
         except Exception as e:
-            return self._json({'error': str(e)}, 400)
-
-    # ------------------------------
-    # 3. Update Cart Line
-    # ------------------------------
-    @http.route('/api/checkout/update/<int:cart_id>', type='json', auth='none', methods=['POST'], csrf=False)
-    def update_cart(self, cart_id, **kw):
-        try:
-            auth_error = self._check_api_key()
-            if auth_error:
-                return auth_error
-
-            data = request.jsonrequest or {}
-            line_id = data.get('line_id')
-            quantity = data.get('quantity')
-            remove = data.get('remove')
-
-            if not line_id:
-                return self._json({'error': 'Line ID is required'}, 400)
-
-            order = request.env['sale.order'].sudo().browse(cart_id)
-            if not order.exists():
-                return self._json({'error': 'Cart not found'}, 404)
-
-            totals = order.update_cart_line(line_id, quantity, remove)
-
-            return self._json({
-                'success': True,
-                'cart_id': cart_id,
-                **totals
-            })
-
-        except Exception as e:
-            return self._json({'error': str(e)}, 400)
-
-    # ------------------------------
-    # 4. Apply Discount Code
-    # ------------------------------
-    @http.route('/api/checkout/discount/<int:cart_id>', type='json', auth='none', methods=['POST'], csrf=False)
-    def apply_discount(self, cart_id, **kw):
-        try:
-            auth_error = self._check_api_key()
-            if auth_error:
-                return auth_error
-
-            data = request.jsonrequest or {}
-            code = data.get('code')
-
-            if not code:
-                return self._json({'error': 'Discount code is required'}, 400)
-
-            order = request.env['sale.order'].sudo().browse(cart_id)
-            if not order.exists():
-                return self._json({'error': 'Cart not found'}, 404)
-
-            result = order.apply_discount(code)
-
-            return self._json({
-                'success': True,
-                **result
-            })
-
-        except Exception as e:
-            return self._json({'error': str(e)}, 400)
-
-    # ------------------------------
-    # 5. Confirm Checkout
-    # ------------------------------
-    @http.route('/api/checkout/confirm/<int:cart_id>', type='json', auth='none', methods=['POST'], csrf=False)
-    def confirm_order(self, cart_id, **kw):
-        try:
-            auth_error = self._check_api_key()
-            if auth_error:
-                return auth_error
-
-            data = request.jsonrequest or {}
-            address_data = data.get('address')
-
-            order = request.env['sale.order'].sudo().browse(cart_id)
-            if not order.exists():
-                return self._json({'error': 'Cart not found'}, 404)
-
-            result = order.confirm_checkout(address_data)
-            partner_name = order.partner_id.name or ""
-
-            return self._json({
-                'success': True,
-                'user_type': 'guest' if partner_name.startswith('Guest_') else 'partner',
-                **result
-            })
-
-        except Exception as e:
-            return self._json({'error': str(e)}, 400)
-
+            _logger.error("Carrier update failed: %s", str(e))
+            return {'status': 'error', 'message': str(e)}

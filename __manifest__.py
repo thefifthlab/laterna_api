@@ -27,4 +27,7 @@
     'demo': [
         # 'demo/demo.xml',
     ],
+    'installable': True,
+    'application': False,
+    'license': 'LGPL-3',
 }
