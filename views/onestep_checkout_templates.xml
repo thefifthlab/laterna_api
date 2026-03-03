@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <template id="onestep_checkout" name="One Step Checkout">
+            <t t-call="website.layout">
+                <div id="wrap">
+                    <div class="container oe_website_sale py-2">
+                        <div class="row">
+                            <div class="col-12">
+                                <h1 class="mb-4">Complete Your Order</h1>
+                            </div>
+
+                            <div class="col-lg-8">
+                                <form action="/shop/confirm_order" method="post" class="checkout_autoformat">
+                                    <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
+
+                                    <div class="card p-4">
+                                        <h3>Shipping Address</h3>
+                                        <p>Order Reference: <t t-esc="order.name"/></p>
+                                        <input type="text" name="name" t-att-value="checkout_values['billing']['name']" class="form-control" placeholder="Full Name"/>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary mt-3">Confirm Order</button>
+                                </form>
+                            </div>
+
+                            <div class="col-lg-4">
+                                <h3>Order Summary</h3>
+                                <t t-call="website_sale.total"/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </t>
+        </template>
+    </data>
+</odoo>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <!-- Ensure signup template exists -->
+        <record id="mail_template_user_signup_account_created" model="mail.template">
+            <field name="name">Signup: Account Created</field>
+            <field name="model_id" ref="base.model_res_users"/>
+            <field name="email_from">{{ object.company_id.email or 'no-reply@yourdomain.com' }}</field>
+            <field name="email_to">{{ object.email }}</field>
+            <field name="subject">Welcome to {{ object.company_id.name }}!</field>
+            <field name="body_html"><![CDATA[
+                <p>Hello {{ object.name }},</p>
+                <p>Your account has been created successfully.</p>
+                <p>You can now log in at: <a href="{{ ctx.get('base_url') }}">{{ ctx.get('base_url') }}</a></p>
+                <p>Username: {{ object.email }}</p>
+            ]]></field>
+        </record>
+    </data>
+</odoo>

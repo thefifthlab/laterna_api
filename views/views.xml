@@ -1,0 +1,60 @@
+<odoo>
+  <data>
+    <!-- explicit list view definition -->
+<!--
+    <record model="ir.ui.view" id="laterna_books.list">
+      <field name="name">laterna_books list</field>
+      <field name="model">laterna_books.laterna_books</field>
+      <field name="arch" type="xml">
+        <list>
+          <field name="name"/>
+          <field name="value"/>
+          <field name="value2"/>
+        </list>
+      </field>
+    </record>
+-->
+
+    <!-- actions opening views on models -->
+<!--
+    <record model="ir.actions.act_window" id="laterna_books.action_window">
+      <field name="name">laterna_books window</field>
+      <field name="res_model">laterna_books.laterna_books</field>
+      <field name="view_mode">list,form</field>
+    </record>
+-->
+
+    <!-- server action to the one above -->
+<!--
+    <record model="ir.actions.server" id="laterna_books.action_server">
+      <field name="name">laterna_books server</field>
+      <field name="model_id" ref="model_laterna_authentication_laterna_authentication"/>
+      <field name="state">code</field>
+      <field name="code">
+        action = {
+          "type": "ir.actions.act_window",
+          "view_mode": "list,form",
+          "res_model": model._name,
+        }
+      </field>
+    </record>
+-->
+
+    <!-- Top menu item -->
+<!--
+    <menuitem name="laterna_books" id="laterna_books.menu_root"/>
+-->
+    <!-- menu categories -->
+<!--
+    <menuitem name="Menu 1" id="laterna_books.menu_1" parent="laterna_books.menu_root"/>
+    <menuitem name="Menu 2" id="laterna_books.menu_2" parent="laterna_books.menu_root"/>
+-->
+    <!-- actions -->
+<!--
+    <menuitem name="List" id="laterna_books.menu_1_list" parent="laterna_books.menu_1"
+              action="laterna_books.action_window"/>
+    <menuitem name="Server to list" id="laterna_books" parent="laterna_books.menu_2"
+              action="laterna_books.action_server"/>
+-->
+  </data>
+</odoo>
