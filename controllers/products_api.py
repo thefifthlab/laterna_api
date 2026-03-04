@@ -344,43 +344,55 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/v1/product_details/<int:product_id>',
-                type='http',
-                auth='public',
-                methods=['POST'],
-                csrf=False,
-                cors='*')
+    @http.route(
+        '/api/v1/product_details/<int:product_id>',
+        type='http', auth='public', methods=['GET', 'POST'], csrf=False, cors='*'
+    )
     def get_product_details(self, product_id, **kwargs):
-        """
-        Fetch detailed product info by ID (now using type='http' for full response control).
-        Expects JSON body in POST (if any), returns clean JSON.
-        """
-        product = request.env['product.template'].sudo().browse(product_id)
-        if not product.exists():
-            error_data = {'error': 'Product not found'}
-            return request.make_response(
-                json.dumps(error_data),
-                status=404,
-                headers={'Content-Type': 'application/json'}
-            )
+        """Product details with optional attribute selection for variant price/image/stock."""
+        template = request.env['product.template'].sudo().browse(product_id)
+        if not template.exists():
+            return request.make_response(json.dumps({'error': 'Product not found'}), status=404,
+                                         headers={'Content-Type': 'application/json'})
 
-        # ── Attributes with correct per-value price_extra ──
+        payload = {}
+        if request.httprequest.method == 'POST':
+            try:
+                payload = request.httprequest.get_json(force=True) or {}
+            except:
+                return request.make_response(json.dumps({'error': 'Invalid JSON payload'}), status=400,
+                                             headers={'Content-Type': 'application/json'})
+
+        selected_attributes = payload.get('selected_attributes', {})  # e.g. {"1": 5, "2": 8}
+        selected_ptav_ids = []
+
+        for attr_str, val_str in selected_attributes.items():
+            try:
+                attr_id = int(attr_str)
+                val_id = int(val_str)
+                ptav = template.product_template_attribute_value_ids.filtered(
+                    lambda x: x.attribute_id.id == attr_id and x.product_attribute_value_id.id == val_id
+                )
+                if ptav:
+                    selected_ptav_ids.append(ptav.id)
+            except:
+                pass
+
+        # Attributes
         attributes = []
-        for line in product.attribute_line_ids:
+        for line in template.attribute_line_ids:
             values = []
-            for value in line.value_ids:
-                link = request.env['product.template.attribute.value'].sudo().search([
-                    ('product_tmpl_id', '=', product.id),
-                    ('attribute_id', '=', line.attribute_id.id),
-                    ('product_attribute_value_id', '=', value.id),
-                ], limit=1)
-                price_extra = link.price_extra if link else 0.0
-
+            for value in line.product_template_value_ids:
+                ptav = template.product_template_attribute_value_ids.filtered(
+                    lambda x: x.attribute_id == line.attribute_id and x.product_attribute_value_id == value
+                )
+                price_extra = ptav.price_extra if ptav else 0.0
                 values.append({
                     'id': value.id,
                     'name': value.name,
                     'price_extra': price_extra,
                     'is_custom': value.is_custom,
+                    'html_color': value.html_color or False,
                 })
 
             attributes.append({
@@ -391,30 +403,52 @@ class ProductAPI(http.Controller):
                 'default_value_id': line.default_value_id.id if line.default_value_id else False,
             })
 
-        # Image fallback
-        image_url = False
-        if product.image_1920:
-            image_url = f'/web/image/product.template/{product.id}/image_1920'
-        elif product.product_image_ids:  # more reliable in recent versions
-            image_url = f'/web/image/product.image/{product.product_image_ids[0].id}/image_1920'
+        # Variant
+        variant = None
+        current_price = template.list_price
+        sku = template.default_code or ''
+        image_url = None
+        base_url = request.httprequest.host_url.rstrip('/')
 
-        # Build response data
+        if selected_ptav_ids:
+            variant = request.env['product.product'].sudo().search([
+                ('product_tmpl_id', '=', template.id),
+                ('product_template_attribute_value_ids', 'in', selected_ptav_ids),
+            ], limit=1)
+            if variant:
+                current_price = variant.lst_price
+                sku = variant.default_code or sku
+                if variant.image_1920:
+                    image_url = f"{base_url}/web/image/product.product/{variant.id}/image_1920"
+
+        if not image_url:
+            if template.image_1920:
+                image_url = f"{base_url}/web/image/product.template/{template.id}/image_1920"
+            elif template.product_variant_ids and template.product_variant_ids[0].image_1920:
+                v = template.product_variant_ids[0]
+                image_url = f"{base_url}/web/image/product.product/{v.id}/image_1920"
+
+        in_stock = variant.virtual_available > 0 if variant else template.virtual_available > 0
+
         data = {
-            'id': product.id,
-            'name': product.name,
-            'base_price': product.list_price,
-            'description': product.description_sale,
+            'id': template.id,
+            'name': template.name,
+            'base_price': round(template.list_price, 2),
+            'current_price': round(current_price, 2),
+            'price_extra_total': round(current_price - template.list_price, 2),
+            'description': template.description_sale or "",
             'image_url': image_url,
             'attributes': attributes,
-            'in_stock': product.virtual_available > 0,  # better than qty_available for most cases
-            'out_of_stock_message': product.out_of_stock_message or "Out of stock",
+            'selected_attributes': selected_attributes,
+            'variant_id': variant.id if variant else False,
+            'sku': sku or False,
+            'in_stock': in_stock,
+            'out_of_stock_message': template.out_of_stock_message or "Out of stock",
+            'weight': template.weight,
+            'volume': template.volume,
         }
 
-        # Return clean JSON with 200 OK
-        return request.make_response(
-            json.dumps(data),
-            headers={'Content-Type': 'application/json'}
-        )
+        return request.make_response(json.dumps(data, default=str), headers={'Content-Type': 'application/json'})
 
     @http.route(
         '/api/v1/products/assign',
@@ -542,7 +576,6 @@ class ProductAPI(http.Controller):
         csrf=False,
         cors='*'
     )
-
     def get_products_by_parent_and_subcategory(self, **kwargs):
         """
         Fetch published products under a specific parent category + subcategory (hierarchical).
@@ -1089,4 +1122,3 @@ class ProductAPI(http.Controller):
             base_url = request.httprequest.host_url.strip('/')
             return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
         return ''
-
