@@ -11,7 +11,7 @@ _logger = logging.getLogger(__name__)
 class ProductAPI(http.Controller):
 
     @http.route(
-        '/api/v1/old/products',
+        '/api/v1/allproduct',
         type='http',
         auth='public',
         methods=['GET'],

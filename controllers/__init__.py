@@ -16,4 +16,5 @@ from . import api_shop_checkout
 from . import user_api_controller
 from . import checkout_api
 from . import auth_internal_user_signup
+from . import portal_auth_signup
 

@@ -10,11 +10,11 @@ _logger = logging.getLogger(__name__)
 
 class ProductAPI(http.Controller):
     @http.route(
-        '/api/v1/product_details/<int:product_id>',
+        '/api/v1/products',
         type='http',
         auth='public',
-        methods=['POST'],
         csrf=False,
+        methods=['GET'],
         cors='*'
     )
     def list_products(self, **kwargs):
@@ -345,51 +345,42 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/v1/product_details/<int:product_id>', type='http', auth='public', methods=['POST'], csrf=False,
+    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['POST'], csrf=False,
                 cors='*')
     def get_product_details(self, product_id, **kwargs):
-        # 1. Fetch the product
+        """
+        Fetch detailed product info by ID.
+        - product_id: ID of product.template.
+        - Returns: Dict with name, price, variants (e.g., legs: steel/aluminum), images, etc.
+        """
         product = request.env['product.template'].sudo().browse(product_id)
+        if not product.exists():
+            return {'error': 'Product not found'}
 
-        if not product.exists() or not product.active:
-            return request.make_json_response({
-                "success": False,
-                "error": "Product not found"
-            }, status=404)
-
-        # 2. Build the attributes list
+        # Fetch variants/attributes (e.g., legs material, color)
         attributes = []
-        for line in product.attribute_line_ids:
+        for attr_line in product.attribute_line_ids:
+            attr_values = [{'id': v.id, 'name': v.name} for v in attr_line.value_ids]
             attributes.append({
-                'attribute_id': line.attribute_id.id,
-                'name': line.attribute_id.name,
-                'display_type': line.attribute_id.display_type,
-                'values': [{
-                    'id': val.id,
-                    'name': val.name,
-                    'price_extra': val.price_extra
-                } for val in line.product_template_value_ids]
+                'attribute': attr_line.attribute_id.name,  # e.g., 'Legs', 'Color'
+                'values': attr_values,  # e.g., [{'id':1, 'name':'Steel'}, {'id':2, 'name':'Aluminum'}]
+                'price_extra': attr_line.value_price_extra  # e.g., +$50.40 for Aluminum
             })
 
-        # 3. Prepare the data payload
-        base_url = request.env['ir.config_parameter'].sudo().get_param('web.base.url')
-        payload = {
-            'success': True,
-            'data': {
-                'id': product.id,
-                'name': product.name,
-                'base_price': product.list_price,
-                'currency': product.currency_id.name,
-                'description': product.description_sale or "",
-                'image_url': f"{base_url}/web/image/product.template/{product.id}/image_1024" if product.image_1024 else False,
-                'attributes': attributes,
-                'in_stock': product.qty_available > 0,
-                'website_url': f"{base_url}/shop/product/{product.id}"
-            }
-        }
+        # Base price and image
+        image_url = '/web/image/product.template/%s/image_1920' % product_id if product.image_1920 else False
 
-        # 4. Return as standard HTTP JSON response
-        return request.make_json_response(payload, status=200)
+        return {
+            'id': product.id,
+            'name': product.name,  # e.g., 'Customizable Desk'
+            'base_price': product.list_price,  # e.g., 750.00
+            'description': product.description_sale,
+            'image_url': image_url,
+            'attributes': attributes,  # Customizable options
+            'in_stock': product.qty_available > 0,
+            'out_of_stock_message': product.out_of_stock_message,
+            'website_url': product.website_url if hasattr(product, 'website_url') else False
+        }
 
     @http.route('/api/v1/products/assign', type='json', auth='user', methods=['POST'], csrf=False, cors='*')
     def assign_products_to_category(self, **kwargs):

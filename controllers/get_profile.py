@@ -6,7 +6,7 @@ import jwt
 
 from odoo import http
 from odoo.http import request, Response
-from odoo.exceptions import AccessDenied
+from odoo.exceptions import AccessDenied, ValidationError
 
 _logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ _logger = logging.getLogger(__name__)
 class ProfileAPI(http.Controller):
 
     # -------------------------------------------------------------
-    # Helper: Return JSON response with status code & CORS
+    # Helper: JSON response with CORS headers
     # -------------------------------------------------------------
     def _json_response(self, data, status=200):
         headers = {
@@ -30,27 +30,27 @@ class ProfileAPI(http.Controller):
         )
 
     # -------------------------------------------------------------
-    # Bearer Token Authentication (shared)
+    # Bearer Token Authentication
     # -------------------------------------------------------------
     def _authenticate_bearer(self):
         auth_header = request.httprequest.headers.get('Authorization')
-
         if not auth_header or not auth_header.startswith('Bearer '):
             raise AccessDenied("Bearer token missing or invalid format")
 
         token = auth_header.split(' ')[1]
-
         secret_key = request.env['ir.config_parameter'].sudo().get_param(
             'auth_token.secret_key'
         )
         if not secret_key:
-            raise AccessDenied("Server misconfiguration: missing secret key")
+            _logger.error("JWT secret key not configured in ir.config_parameter 'auth_token.secret_key'")
+            raise AccessDenied("Server configuration error")
 
         try:
             payload = jwt.decode(
                 token,
                 secret_key,
-                algorithms=['HS256']
+                algorithms=['HS256'],
+                options={"require": ["exp", "iat"]},
             )
         except jwt.ExpiredSignatureError:
             raise AccessDenied("Token has expired")
@@ -68,18 +68,10 @@ class ProfileAPI(http.Controller):
         return user
 
     # -------------------------------------------------------------
-    # Build Profile Payload
+    # Build profile payload (image as URL)
     # -------------------------------------------------------------
     def _build_profile(self, user):
         partner = user.partner_id
-
-        image_1920 = False
-        if user.image_1920:
-            image_1920 = (
-                user.image_1920.decode('utf-8')
-                if isinstance(user.image_1920, bytes)
-                else user.image_1920
-            )
 
         return {
             "id": user.id,
@@ -88,7 +80,7 @@ class ProfileAPI(http.Controller):
             "email": user.email or False,
             "phone": user.phone or False,
             "mobile": user.mobile or False,
-            "image_1920": image_1920,
+            "image_url": f"/web/image/res.users/{user.id}/image_1920" if user.image_1920 else False,
             "partner": {
                 "partner_id": partner.id,
                 "street": partner.street or False,
@@ -101,24 +93,24 @@ class ProfileAPI(http.Controller):
         }
 
     # -------------------------------------------------------------
-    # POST /api/v1/profile  →  Get user profile
+    # GET/POST /api/v1/profile → Fetch user profile
     # -------------------------------------------------------------
     @http.route(
         '/api/v1/profile',
         type='http',
         auth='none',
-        methods=['POST'],
+        methods=['GET', 'POST'],
         csrf=False,
         cors="*"
     )
-    def get_profile(self):
+    def profile(self):
         try:
             user = self._authenticate_bearer()
-            profile = self._build_profile(user)
+            profile_data = self._build_profile(user)
 
             return self._json_response({
                 "success": True,
-                "profile": profile
+                "profile": profile_data
             }, status=200)
 
         except AccessDenied as e:
@@ -129,7 +121,7 @@ class ProfileAPI(http.Controller):
             }, status=401)
 
         except Exception as e:
-            _logger.exception("Get profile error")
+            _logger.exception("Profile fetch error")
             return self._json_response({
                 "success": False,
                 "error": "Internal error",
@@ -137,12 +129,12 @@ class ProfileAPI(http.Controller):
             }, status=500)
 
     # -------------------------------------------------------------
-    # PUT/PATCH/POST /api/v1/update/profile  →  Update profile
+    # PUT/PATCH/POST /api/v1/profile/update → Update profile
     # -------------------------------------------------------------
     @http.route(
-        '/api/v1/update/profile',
+        '/api/v1/profile/update',
         type='http',
-        auth='none',           # using manual JWT → changed from 'user'
+        auth='none',
         methods=['PUT', 'PATCH', 'POST'],
         csrf=False,
         cors="*"
@@ -158,156 +150,149 @@ class ProfileAPI(http.Controller):
             }, status=401)
 
         try:
-            # Parse JSON body
-            try:
-                payload = request.httprequest.get_json() or {}
-            except:
-                return self._json_response({
-                    "success": False,
-                    "error": "Invalid JSON body"
-                }, status=400)
-
-            allowed_fields = {
-                'name', 'email', 'phone', 'mobile',
-                'street', 'street2', 'city', 'zip', 'country_id', 'state_id',
-                'image_1920'
-            }
-
-            update_vals = {}
-            partner_vals = {}
-
-            for key, value in payload.items():
-                if key not in allowed_fields:
-                    continue
-
-                if key in {'street', 'street2', 'city', 'zip', 'country_id', 'state_id'}:
-                    if key in ('country_id', 'state_id') and value:
-                        try:
-                            value = int(value)
-                        except (ValueError, TypeError):
-                            continue
-                    partner_vals[key] = value or False
-                else:
-                    if key == 'image_1920' and value:
-                        try:
-                            if ',' in value:  # data:image/...;base64,
-                                value = value.split(',')[1]
-                            value = base64.b64decode(value)
-                        except Exception:
-                            continue
-                    update_vals[key] = value or False
-
-            if update_vals:
-                user.sudo().write(update_vals)
-            if partner_vals:
-                user.partner_id.sudo().write(partner_vals)
-
-            return self._json_response({
-                "success": True,
-                "message": "Profile updated successfully",
-                "user_id": user.id
-            }, status=200)
-
-        except Exception as e:
-            _logger.exception("Profile update error")
+            payload = request.httprequest.get_json() or {}
+        except:
             return self._json_response({
                 "success": False,
-                "error": str(e)
-            }, status=500)
+                "error": "Invalid JSON body"
+            }, status=400)
+
+        allowed_user_fields = {'name', 'email', 'phone', 'mobile', 'image_1920'}
+        allowed_partner_fields = {'street', 'street2', 'city', 'zip', 'country_id', 'state_id'}
+
+        user_vals = {}
+        partner_vals = {}
+
+        for key, value in payload.items():
+            if key in allowed_user_fields:
+                if key == 'image_1920' and value:
+                    try:
+                        if ',' in value:  # data:image/...;base64,
+                            value = value.split(',', 1)[1]
+                        raw_image = base64.b64decode(value)
+                        if len(raw_image) > 4 * 1024 * 1024:  # 4MB limit
+                            return self._json_response({
+                                "success": False,
+                                "error": "Image file too large (max 4MB)"
+                            }, status=400)
+                        # Very basic format check
+                        if not raw_image.startswith((b'\x89PNG', b'\xff\xd8\xff', b'GIF8')):
+                            return self._json_response({
+                                "success": False,
+                                "error": "Unsupported image format"
+                            }, status=400)
+                        user_vals[key] = raw_image
+                    except Exception:
+                        continue
+                else:
+                    user_vals[key] = value or False
+
+            elif key in allowed_partner_fields:
+                if key in ('country_id', 'state_id') and value:
+                    try:
+                        value = int(value)
+                    except (ValueError, TypeError):
+                        continue
+                partner_vals[key] = value or False
+
+        # Email uniqueness check
+        if 'email' in user_vals and user_vals['email']:
+            duplicate = request.env['res.users'].sudo().search([
+                ('email', '=ilike', user_vals['email']),
+                ('id', '!=', user.id),
+            ], limit=1)
+            if duplicate:
+                return self._json_response({
+                    "success": False,
+                    "error": "Email address already in use by another user"
+                }, status=400)
+
+        if user_vals:
+            user.sudo().write(user_vals)
+        if partner_vals:
+            user.partner_id.sudo().write(partner_vals)
+
+        return self._json_response({
+            "success": True,
+            "message": "Profile updated successfully",
+            "user_id": user.id
+        }, status=200)
 
     # -------------------------------------------------------------
-    # POST /api/v1/profile/change-password  →  Change password
+    # POST /api/v1/profile/change-password
     # -------------------------------------------------------------
-    @http.route(
-        '/api/v1/profile/change-password',
-        type='http',
-        auth='none',
-        methods=['POST'],
-        csrf=False,
-        cors="*"
-    )
+    @http.route('/api/v1/profile/change-password', type='http', auth='none', methods=['POST'], csrf=False, cors="*")
     def change_password(self):
         client_ip = request.httprequest.remote_addr
-        request_time = datetime.datetime.now().isoformat()
+        now = datetime.datetime.now().isoformat()
 
+        # 1. Authenticate Request
         try:
             user = self._authenticate_bearer()
         except AccessDenied as e:
-            _logger.warning(f"[{request_time}] Unauthorized change-password attempt from {client_ip}: {str(e)}")
-            return self._json_response({
-                "status": "error",
-                "message": str(e)
-            }, status=401)
+            _logger.warning(f"[{now}] Unauthorized access attempt from {client_ip}: {str(e)}")
+            return self._json_response({"success": False, "error": "Unauthorized"}, status=401)
 
+        # 2. Parse JSON Body
         try:
-            # Parse JSON body
-            try:
-                data = request.httprequest.get_json() or {}
-            except:
-                return self._json_response({
-                    "status": "error",
-                    "message": "Invalid or missing JSON body"
-                }, status=400)
-
-            current_password = data.get('current_password', '').strip()
-            new_password    = data.get('new_password', '').strip()
-            confirm_password = data.get('confirm_password', '').strip()
-
-            if not all([current_password, new_password, confirm_password]):
-                return self._json_response({
-                    "status": "error",
-                    "message": "All fields are required: current_password, new_password, confirm_password"
-                }, status=400)
-
-            if new_password != confirm_password:
-                return self._json_response({
-                    "status": "error",
-                    "message": "New password and confirmation do not match"
-                }, status=400)
-
-            if current_password == new_password:
-                return self._json_response({
-                    "status": "error",
-                    "message": "New password must be different from current password"
-                }, status=400)
-
-            # Replace with your real password strength check
-            def _strong_password(pwd):
-                if len(pwd) < 8:
-                    return False, "Password must be at least 8 characters"
-                # Add digits, uppercase, special chars checks if needed
-                return True, ""
-
-            valid, msg = _strong_password(new_password)
-            if not valid:
-                return self._json_response({
-                    "status": "error",
-                    "message": msg
-                }, status=400)
-
-            # Verify current password
-            try:
-                user._check_credentials(current_password, raise_exception=True)
-            except AccessDenied:
-                _logger.warning(f"[{request_time}] Wrong password for {user.login} from {client_ip}")
-                return self._json_response({
-                    "status": "error",
-                    "message": "Current password is incorrect"
-                }, status=401)
-
-            # Update password
-            user.sudo().write({'password': new_password})
-
-            _logger.info(f"[{request_time}] Password changed for {user.login} (ID: {user.id}) from {client_ip}")
-
+            # Ensure the client sends 'Content-Type: application/json'
+            data = request.httprequest.get_json() or {}
+        except Exception:
             return self._json_response({
-                "status": "success",
-                "message": "Password changed successfully"
-            }, status=200)
+                "success": False,
+                "error": "Invalid JSON format. Ensure Content-Type is application/json"
+            }, status=400)
+
+        # 3. Extract and Clean Data
+        current_pwd = data.get('current_password', '').strip()
+        new_pwd = data.get('new_password', '').strip()
+        confirm_pwd = data.get('confirm_password', '').strip()
+
+        # 4. Preliminary Validations
+        if not all([current_pwd, new_pwd, confirm_pwd]):
+            return self._json_response({
+                "success": False,
+                "error": "All fields required: current_password, new_password, confirm_password"
+            }, status=400)
+
+        if new_pwd != confirm_pwd:
+            return self._json_response({"success": False, "error": "New passwords do not match"}, status=400)
+
+        if current_pwd == new_pwd:
+            return self._json_response({"success": False, "error": "New password must be different from current"},
+                                       status=400)
+
+        if len(new_pwd) < 8:
+            return self._json_response({"success": False, "error": "Password must be at least 8 characters"},
+                                       status=400)
+
+        # 5. Verify Current Credentials (Odoo 18 Fix)
+        try:
+            # Odoo 18 expects a credential dictionary, not a string
+            credentials = {
+                'type': 'password',
+                'password': current_pwd
+            }
+            # We check against the user's specific environment
+            user.with_user(user)._check_credentials(credentials, {'interactive_login': True})
+        except AccessDenied:
+            _logger.warning(f"[{now}] Incorrect current password for {user.login} from {client_ip}")
+            return self._json_response({"success": False, "error": "Current password is incorrect"}, status=401)
+        except Exception as e:
+            _logger.error(f"Error during credential check: {str(e)}")
+            return self._json_response({"success": False, "error": "Authentication system error"}, status=500)
+
+        # 6. Update Password and Persist
+        try:
+            # .sudo() is required to write to the 'password' field via controller
+            user.sudo().write({'password': new_pwd})
+
+            # Manual commit ensures the DB is updated before the response is sent
+            request.env.cr.commit()
+
+            _logger.info(f"[{now}] Password successfully changed for {user.login} (ID: {user.id})")
+            return self._json_response({"success": True, "message": "Password changed successfully"}, status=200)
 
         except Exception as e:
-            _logger.exception(f"[{request_time}] Change password error: {str(e)}")
-            return self._json_response({
-                "status": "error",
-                "message": "Internal server error"
-            }, status=500)
+            _logger.error(f"Database error during password update: {str(e)}")
+            return self._json_response({"success": False, "error": "Internal server error"}, status=500)
