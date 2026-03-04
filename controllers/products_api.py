@@ -196,7 +196,6 @@ class ProductAPI(http.Controller):
                 status=500
             )
 
-
     @http.route('/api/v1/categories', type='http', auth='public', methods=['GET'], csrf=False, cors='*')
     def list_categories(self, **kwargs):
         """List categories or subcategories based on parent_id."""
@@ -345,338 +344,749 @@ class ProductAPI(http.Controller):
         hierarchy = [build_hierarchy(cat) for cat in root_categories]
         return request.make_json_response(hierarchy, status=200)
 
-    @http.route('/api/v1/product_details/<int:product_id>', type='json', auth='public', methods=['POST'], csrf=False,
+    @http.route('/api/v1/product_details/<int:product_id>',
+                type='http',
+                auth='public',
+                methods=['POST'],
+                csrf=False,
                 cors='*')
     def get_product_details(self, product_id, **kwargs):
         """
-        Fetch detailed product info by ID.
-        - product_id: ID of product.template.
-        - Returns: Dict with name, price, variants (e.g., legs: steel/aluminum), images, etc.
+        Fetch detailed product info by ID (now using type='http' for full response control).
+        Expects JSON body in POST (if any), returns clean JSON.
         """
         product = request.env['product.template'].sudo().browse(product_id)
         if not product.exists():
-            return {'error': 'Product not found'}
+            error_data = {'error': 'Product not found'}
+            return request.make_response(
+                json.dumps(error_data),
+                status=404,
+                headers={'Content-Type': 'application/json'}
+            )
 
-        # Fetch variants/attributes (e.g., legs material, color)
+        # ── Attributes with correct per-value price_extra ──
         attributes = []
-        for attr_line in product.attribute_line_ids:
-            attr_values = [{'id': v.id, 'name': v.name} for v in attr_line.value_ids]
+        for line in product.attribute_line_ids:
+            values = []
+            for value in line.value_ids:
+                link = request.env['product.template.attribute.value'].sudo().search([
+                    ('product_tmpl_id', '=', product.id),
+                    ('attribute_id', '=', line.attribute_id.id),
+                    ('product_attribute_value_id', '=', value.id),
+                ], limit=1)
+                price_extra = link.price_extra if link else 0.0
+
+                values.append({
+                    'id': value.id,
+                    'name': value.name,
+                    'price_extra': price_extra,
+                    'is_custom': value.is_custom,
+                })
+
             attributes.append({
-                'attribute': attr_line.attribute_id.name,  # e.g., 'Legs', 'Color'
-                'values': attr_values,  # e.g., [{'id':1, 'name':'Steel'}, {'id':2, 'name':'Aluminum'}]
-                'price_extra': attr_line.value_price_extra  # e.g., +$50.40 for Aluminum
+                'attribute_id': line.attribute_id.id,
+                'attribute_name': line.attribute_id.name,
+                'display_type': line.attribute_id.display_type,
+                'values': values,
+                'default_value_id': line.default_value_id.id if line.default_value_id else False,
             })
 
-        # Base price and image
-        image_url = '/web/image/product.template/%s/image_1920' % product_id if product.image_1920 else False
+        # Image fallback
+        image_url = False
+        if product.image_1920:
+            image_url = f'/web/image/product.template/{product.id}/image_1920'
+        elif product.product_image_ids:  # more reliable in recent versions
+            image_url = f'/web/image/product.image/{product.product_image_ids[0].id}/image_1920'
 
-        return {
+        # Build response data
+        data = {
             'id': product.id,
-            'name': product.name,  # e.g., 'Customizable Desk'
-            'base_price': product.list_price,  # e.g., 750.00
+            'name': product.name,
+            'base_price': product.list_price,
             'description': product.description_sale,
             'image_url': image_url,
-            'attributes': attributes,  # Customizable options
-            'in_stock': product.qty_available > 0,
-            'out_of_stock_message': product.out_of_stock_message,
-            'website_url': product.website_url if hasattr(product, 'website_url') else False
+            'attributes': attributes,
+            'in_stock': product.virtual_available > 0,  # better than qty_available for most cases
+            'out_of_stock_message': product.out_of_stock_message or "Out of stock",
         }
 
-    @http.route('/api/v1/products/assign', type='json', auth='user', methods=['POST'], csrf=False, cors='*')
+        # Return clean JSON with 200 OK
+        return request.make_response(
+            json.dumps(data),
+            headers={'Content-Type': 'application/json'}
+        )
+
+    @http.route(
+        '/api/v1/products/assign',
+        type='http',
+        auth='user',  # Change to 'public' + API key validation if needed
+        methods=['POST'],
+        csrf=False,
+        cors='*'
+    )
     def assign_products_to_category(self, **kwargs):
         """
-        Assign products to a category/subcategory.
-        - JSON Body: {'product_ids': [1,2], 'category_ids': [198,199], 'replace': true}  # replace=True clears old assignments
-        - Auth: User/API key required (e.g., Authorization: Bearer <key>).
-        - Returns: {'success': true, 'assigned': [(prod_id, cat_ids)]}
+        Assign one or more products to one or more public website categories.
+
+        POST /api/v1/products/assign
+        Content-Type: application/json
+
+        Example request body:
+        {
+            "product_ids": [15, 42, 100],
+            "category_ids": [198, 199],
+            "replace": true
+        }
+
+        - replace: true  → remove all existing categories and set only the new ones (default)
+        - replace: false → add the new categories without removing existing ones
+
+        Successful response (200 OK):
+        {
+            "success": true,
+            "message": "3 product(s) assigned to 2 category(ies)",
+            "assigned": [
+                [15, [198, 199]],
+                [42, [198, 199]],
+                [100, [198, 199]]
+            ]
+        }
+
+        Error responses:
+        - 400 Bad Request → missing/invalid input
+        - 404 Not Found   → one or more IDs do not exist
+        - 500 Server Error → unexpected exception
         """
+        # 1. Parse JSON body safely
         try:
-            # Parse JSON body
-            body = json.loads(request.httprequest.data.decode('utf-8'))
-            product_ids = body.get('product_ids', [])
-            category_ids = body.get('category_ids', [])
-            replace = body.get('replace', True)  # Default: replace all cats
+            body = request.jsonrequest
+        except Exception:
+            try:
+                body = json.loads(request.httprequest.data.decode('utf-8'))
+            except json.JSONDecodeError:
+                return request.make_json_response(
+                    {'error': 'Invalid or missing JSON body. Please send valid JSON.'},
+                    status=400
+                )
 
-            if not product_ids or not category_ids:
-                return request.make_json_response({'error': 'Missing product_ids or category_ids'}, status=400)
+        # 2. Extract and validate required fields
+        product_ids = body.get('product_ids', [])
+        category_ids = body.get('category_ids', [])
+        replace = body.get('replace', True)  # default: replace existing assignments
 
-            # Validate IDs exist
-            valid_prods = request.env['product.template'].sudo().browse(product_ids).exists()
-            valid_cats = request.env['product.public.category'].sudo().browse(category_ids).exists()
-            if len(valid_prods) != len(product_ids) or len(valid_cats) != len(category_ids):
-                return request.make_json_response({'error': 'Some IDs not found'}, status=404)
+        if not isinstance(product_ids, list) or not isinstance(category_ids, list):
+            return request.make_json_response(
+                {'error': 'product_ids and category_ids must be arrays (lists) of integers'},
+                status=400
+            )
 
-            # Assign (batch write for efficiency)
-            assigned = []
-            for prod in valid_prods:
-                cmd = (6, 0, category_ids.ids) if replace else [(4, cid) for cid in category_ids.ids]
-                prod.sudo().write({'public_categ_ids': cmd})
-                assigned.append((prod.id, category_ids.ids))
+        if not product_ids or not category_ids:
+            return request.make_json_response(
+                {'error': 'Both product_ids and category_ids are required and must be non-empty'},
+                status=400
+            )
 
-            return request.make_json_response({'success': True, 'assigned': assigned}, status=200)
+        # 3. Load and validate records (using sudo() for API simplicity – consider removing in production)
+        Product = request.env['product.template'].sudo()
+        PublicCategory = request.env['product.public.category'].sudo()
 
-        except json.JSONDecodeError:
-            return request.make_json_response({'error': 'Invalid JSON body'}, status=400)
+        products = Product.browse(product_ids)
+        categories = PublicCategory.browse(category_ids)
+
+        # Early existence check
+        if len(products.exists()) != len(product_ids):
+            return request.make_json_response(
+                {'error': 'One or more product_ids do not exist or are inaccessible'},
+                status=404
+            )
+
+        if len(categories.exists()) != len(category_ids):
+            return request.make_json_response(
+                {'error': 'One or more category_ids do not exist or are inaccessible'},
+                status=404
+            )
+
+        # 4. Prepare many2many command
+        if replace:
+            # Replace: clear old → set new ones
+            command = Command.set(categories.ids)
+        else:
+            # Append: only link new ones
+            command = [Command.link(cid) for cid in categories.ids]
+
+        # 5. Perform the assignment (single write when possible)
+        try:
+            # Optimization: if replace=True or all products get the exact same command → bulk write
+            products.write({'public_categ_ids': command})
+
+            # Build response detail
+            assigned = [[p.id, categories.ids] for p in products]
+
+            return request.make_json_response({
+                'success': True,
+                'message': f"{len(products)} product(s) assigned to {len(categories)} category(ies)",
+                'assigned': assigned
+            }, status=200)
+
         except Exception as e:
-            return request.make_json_response({'error': str(e)}, status=500)
+            return request.make_json_response(
+                {'error': f'Failed to assign categories: {str(e)}'},
+                status=500
+            )
 
-    @http.route('/api/v1/products/by_subcategory',
-                type='json', auth='public', methods=['POST'], csrf=False, cors='*')
+    @http.route(
+        '/api/v1/products/by_subcategory',
+        type='http',
+        auth='public',
+        methods=['POST'],
+        csrf=False,
+        cors='*'
+    )
+
     def get_products_by_parent_and_subcategory(self, **kwargs):
         """
-        Fetch all products under a given parent category and subcategory.
-        Example body:
+        Fetch published products under a specific parent category + subcategory (hierarchical).
+
+        POST /api/v1/products/by_subcategory
+        Content-Type: application/json
+
+        Request body example:
         {
             "parent_id": 10,
             "subcategory_id": 25
         }
+
+        Response (200 OK):
+        {
+            "success": true,
+            "parent_category": {"id": 10, "name": "Electronics"},
+            "subcategory": {"id": 25, "name": "Smartphones"},
+            "total_products": 12,
+            "products": [
+                {
+                    "id": 42,
+                    "name": "iPhone 14 Pro",
+                    "list_price": 999.0,
+                    "sale_price": 999.0,          // after pricelist if applied
+                    "currency": "USD",
+                    "description": "...",
+                    "image_url": "/web/image/product.template/42/image_1920",
+                    "slug": "iphone-14-pro",
+                    "stock_quantity": 15,
+                    "in_stock": true
+                },
+                ...
+            ]
+        }
+
+        Errors:
+        - 400 Bad Request (missing/invalid input)
+        - 404 Not Found (category not exist or mismatch)
+        - 500 Server Error
         """
         try:
-            # Safely get the JSON body
-            data = request.jsonrequest if hasattr(request, 'jsonrequest') else request.httprequest.get_json(force=True)
+            # Parse JSON body (preferred in Odoo 18+)
+            try:
+                data = request.jsonrequest
+            except Exception:
+                try:
+                    data = request.httprequest.get_json(force=True)
+                except:
+                    return request.make_json_response(
+                        {'error': 'Invalid or missing JSON body. Send valid JSON.'},
+                        status=400
+                    )
 
             parent_id = data.get('parent_id')
             subcategory_id = data.get('subcategory_id')
 
             if not parent_id or not subcategory_id:
-                return {'error': 'Both parent_id and subcategory_id are required.'}
+                return request.make_json_response(
+                    {'error': 'Both parent_id and subcategory_id are required (integer values).'},
+                    status=400
+                )
 
-            parent = request.env['product.public.category'].sudo().browse(parent_id)
-            subcategory = request.env['product.public.category'].sudo().browse(subcategory_id)
+            # Ensure they are integers
+            try:
+                parent_id = int(parent_id)
+                subcategory_id = int(subcategory_id)
+            except (ValueError, TypeError):
+                return request.make_json_response(
+                    {'error': 'parent_id and subcategory_id must be valid integers.'},
+                    status=400
+                )
 
-            # Validate existence
+            Category = request.env['product.public.category'].sudo()
+            Product = request.env['product.template'].sudo()
+
+            parent = Category.browse(parent_id)
+            subcategory = Category.browse(subcategory_id)
+
             if not parent.exists():
-                return {'error': f'Parent category ID {parent_id} not found.'}
+                return request.make_json_response(
+                    {'error': f'Parent category ID {parent_id} not found.'},
+                    status=404
+                )
+
             if not subcategory.exists():
-                return {'error': f'Subcategory ID {subcategory_id} not found.'}
+                return request.make_json_response(
+                    {'error': f'Subcategory ID {subcategory_id} not found.'},
+                    status=404
+                )
 
-            # Ensure subcategory belongs to parent
+            # Verify subcategory belongs to parent (or is descendant)
             if subcategory.parent_id.id != parent.id:
-                return {'error': f'Subcategory "{subcategory.name}" does not belong to parent "{parent.name}".'}
+                # Optional: allow deeper nesting? If yes → use child_of on parent instead
+                return request.make_json_response(
+                    {'error': f'Subcategory "{subcategory.name}" does not belong to parent "{parent.name}".'},
+                    status=400
+                )
 
-            # Search products under subcategory
-            products = request.env['product.template'].sudo().search([
+            # Domain: products in this subcategory or its children + published + saleable
+            domain = [
                 ('public_categ_ids', 'child_of', subcategory.id),
                 ('sale_ok', '=', True),
                 ('website_published', '=', True),
-            ])
+            ]
 
-            result = [{
-                'id': p.id,
-                'name': p.name,
-                'price': p.list_price,
-                'currency': p.currency_id.name,
-                'subcategory': subcategory.name,
-                'parent_category': parent.name,
-                'description': p.website_description or '',
-                'image_url': f"/web/image/product.template/{p.id}/image_1920",
-                'available_in_stock': p.qty_available,
-            } for p in products]
+            # Optional: filter by current website if multi-website
+            if request.website:
+                domain.append(('website_id', 'in', [False, request.website.id]))
 
-            return {
+            products = Product.search(domain)
+
+            # Optional: apply pricelist (website context)
+            pricelist = request.website.get_current_pricelist() if request.website else None
+
+            result = []
+            for p in products:
+                price = p.list_price
+                if pricelist:
+                    price = pricelist._get_product_price(p, quantity=1)
+
+                image_url = False
+                if p.image_1920:
+                    image_url = f"/web/image/product.template/{p.id}/image_1920"
+                # Fallback to first image if needed
+                elif p.product_image_ids:
+                    image_url = f"/web/image/product.image/{p.product_image_ids[0].id}/image_1920"
+
+                result.append({
+                    'id': p.id,
+                    'name': p.name,
+                    'list_price': p.list_price,
+                    'sale_price': price if not float_is_zero(price - p.list_price,
+                                                             precision_digits=2) else p.list_price,
+                    'currency': p.currency_id.name or 'USD',
+                    'description': p.website_description or p.description_sale or '',
+                    'image_url': image_url,
+                    'slug': p.website_slug if hasattr(p, 'website_slug') else False,
+                    'stock_quantity': p.virtual_available,  # better than qty_available for most cases
+                    'in_stock': p.virtual_available > 0,
+                })
+
+            return request.make_json_response({
+                'success': True,
                 'parent_category': {'id': parent.id, 'name': parent.name},
                 'subcategory': {'id': subcategory.id, 'name': subcategory.name},
                 'total_products': len(result),
                 'products': result,
-            }
+            }, status=200)
 
         except Exception as e:
-            _logger.exception("Error fetching products by subcategory")
-            return {'error': str(e)}
+            _logger.exception("Error in /api/v1/products/by_subcategory: %s", str(e))
+            return request.make_json_response(
+                {'error': 'Internal server error occurred.'},
+                status=500
+            )
 
-    class ProductAPI(http.Controller):
+    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+    def list_products(self, **kwargs):
+        try:
+            # Parse query parameters
+            page = int(kwargs.get('page', 1))
+            limit = int(kwargs.get('limit', 20))
+            category_id = kwargs.get('category_id')
+            search = kwargs.get('search')
+            sort = kwargs.get('sort')
 
-        @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
-        def list_products(self, **kwargs):
-            try:
-                # Parse query parameters
-                page = int(kwargs.get('page', 1))
-                limit = int(kwargs.get('limit', 20))
-                category_id = kwargs.get('category_id')
-                search = kwargs.get('search')
-                sort = kwargs.get('sort')
+            # Build domain for published products
+            domain = [('website_published', '=', True)]
+            if category_id:
+                domain.append(('public_categ_ids', 'in', [int(category_id)]))
+            if search:
+                domain.append(('name', 'ilike', search))
 
-                # Build domain for published products
-                domain = [('website_published', '=', True)]
-                if category_id:
-                    domain.append(('public_categ_ids', 'in', [int(category_id)]))
-                if search:
-                    domain.append(('name', 'ilike', search))
+            # Determine sort order
+            sort_order = 'id'
+            if sort == 'price_asc':
+                sort_order = 'list_price asc'
+            elif sort == 'price_desc':
+                sort_order = 'list_price desc'
+            elif sort == 'name_desc':
+                sort_order = 'name desc'
 
-                # Determine sort order
-                sort_order = 'id'
-                if sort == 'price_asc':
-                    sort_order = 'list_price asc'
-                elif sort == 'price_desc':
-                    sort_order = 'list_price desc'
-                elif sort == 'name_desc':
-                    sort_order = 'name desc'
+            # Search products
+            products = request.env['product.template'].sudo().search(
+                domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+            )
 
-                # Search products
-                products = request.env['product.template'].sudo().search(
-                    domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+            # Get current website's pricelist for proper pricing
+            website = request.env['website'].get_current_website()
+            pricelist = website.pricelist_id
+
+            # Prepare response data
+            product_list = []
+            for product in products:
+                # Get price using pricelist rules
+                price, rule = pricelist._get_product_price_rule(
+                    product,
+                    quantity=qty or 1.0,
+                    partner=partner,
+                    date=False,  # or datetime if needed
+                    uom_id=False  # or the uom
                 )
+                product_list.append({
+                    'id': product.id,
+                    'name': product.name,
+                    'price': price,
+                    'description': product.description or '',
+                    'image_url': self._get_image_url(product),
+                    'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                })
 
-                # Get current website's pricelist for proper pricing
-                website = request.env['website'].get_current_website()
-                pricelist = website.pricelist_id
+            total_count = request.env['product.template'].sudo().search_count(domain)
+            total_pages = math.ceil(total_count / limit) if limit else 1
 
-                # Prepare response data
-                product_list = []
-                for product in products:
-                    # Get price using pricelist rules
-                    price, rule = pricelist._get_product_price_rule(
-                        product,
-                        quantity=qty or 1.0,
-                        partner=partner,
-                        date=False,  # or datetime if needed
-                        uom_id=False  # or the uom
-                    )
-                    product_list.append({
-                        'id': product.id,
-                        'name': product.name,
-                        'price': price,
-                        'description': product.description or '',
-                        'image_url': self._get_image_url(product),
-                        'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
-                    })
+            response = {
+                "products": product_list,
+                "total": total_count,
+                "pages": total_pages
+            }
 
-                total_count = request.env['product.template'].sudo().search_count(domain)
-                total_pages = math.ceil(total_count / limit) if limit else 1
+            return Response(json.dumps(response), status=200, content_type='application/json')
 
-                response = {
-                    "products": product_list,
-                    "total": total_count,
-                    "pages": total_pages
-                }
+        except Exception as e:
+            error = {'error': str(e)}
+            return Response(json.dumps(error), status=500, content_type='application/json')
 
-                return Response(json.dumps(response), status=200, content_type='application/json')
+    def _get_product_price(self, product, pricelist):
+        """Get product price considering pricelist rules"""
+        # Use the product's list_price as fallback
+        price = product.list_price
 
-            except Exception as e:
-                error = {'error': str(e)}
-                return Response(json.dumps(error), status=500, content_type='application/json')
-
-        def _get_product_price(self, product, pricelist):
-            """Get product price considering pricelist rules"""
-            # Use the product's list_price as fallback
-            price = product.list_price
-
+        try:
+            # Try to get price from pricelist
+            price = pricelist.get_product_price(product, 1, False)
+        except Exception:
+            # If that fails, try a different approach
             try:
-                # Try to get price from pricelist
-                price = pricelist.get_product_price(product, 1, False)
+                product_context = dict(request.env.context)
+                product_context.update({
+                    'pricelist': pricelist.id,
+                    'quantity': 1
+                })
+                product = product.with_context(product_context)
+                price = product.price
             except Exception:
-                # If that fails, try a different approach
-                try:
-                    product_context = dict(request.env.context)
-                    product_context.update({
-                        'pricelist': pricelist.id,
-                        'quantity': 1
-                    })
-                    product = product.with_context(product_context)
-                    price = product.price
-                except Exception:
-                    # Fall back to list_price if all else fails
-                    pass
+                # Fall back to list_price if all else fails
+                pass
 
-            return price
+        return price
 
-        def _get_image_url(self, product):
-            if product.image_1920:
-                base_url = request.httprequest.host_url.strip('/')
-                return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
-            return ''
+    def _get_image_url(self, product):
+        if product.image_1920:
+            base_url = request.httprequest.host_url.strip('/')
+            return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
+        return ''
 
-        @http.route('/api/v2/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
-        def list_products(self, **kwargs):
+    @http.route('/api/v2/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+    def list_products(self, **kwargs):
+        try:
+            # Parse query parameters
+            page = int(kwargs.get('page', 1))
+            limit = int(kwargs.get('limit', 20))
+            category_id = kwargs.get('category_id')
+            search = kwargs.get('search')
+            sort = kwargs.get('sort')
+
+            # Build domain for published products
+            domain = [('website_published', '=', True)]
+            if category_id:
+                domain.append(('public_categ_ids', 'in', [int(category_id)]))
+            if search:
+                domain.append(('name', 'ilike', search))
+
+            # Determine sort order
+            sort_order = 'id'
+            if sort == 'price_asc':
+                sort_order = 'list_price asc'
+            elif sort == 'price_desc':
+                sort_order = 'list_price desc'
+            elif sort == 'name_desc':
+                sort_order = 'name desc'
+
+            # Search products
+            products = request.env['product.template'].sudo().search(
+                domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+            )
+
+            # Get current website's pricelist for proper pricing
+            website = request.env['website'].get_current_website()
+            pricelist = website.pricelist_id
+
+            # Prepare response data
+            product_list = []
+            for product in products:
+                # Get price using pricelist rules
+                price = self._get_product_price(product, pricelist)
+
+                product_list.append({
+                    'id': product.id,
+                    'name': product.name,
+                    'price': price,
+                    'description': product.description or '',
+                    'image_url': self._get_image_url(product),
+                    'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                })
+
+            total_count = request.env['product.template'].sudo().search_count(domain)
+            total_pages = math.ceil(total_count / limit) if limit else 1
+
+            response = {
+                "products": product_list,
+                "total": total_count,
+                "pages": total_pages
+            }
+
+            return Response(json.dumps(response), status=200, content_type='application/json')
+
+        except Exception as e:
+            error = {'error': str(e)}
+            return Response(json.dumps(error), status=500, content_type='application/json')
+
+    def _get_product_price(self, product, pricelist):
+        """Get product price considering pricelist rules"""
+        # Use the product's list_price as fallback
+        price = product.list_price
+
+        try:
+            # Try to get price from pricelist
+            price = pricelist.get_product_price(product, 1, False)
+        except Exception:
+            # If that fails, try a different approach
             try:
-                # Parse query parameters
-                page = int(kwargs.get('page', 1))
-                limit = int(kwargs.get('limit', 20))
-                category_id = kwargs.get('category_id')
-                search = kwargs.get('search')
-                sort = kwargs.get('sort')
+                product_context = dict(request.env.context)
+                product_context.update({
+                    'pricelist': pricelist.id,
+                    'quantity': 1
+                })
+                product = product.with_context(product_context)
+                price = product.price
+            except Exception:
+                # Fall back to list_price if all else fails
+                pass
 
-                # Build domain for published products
-                domain = [('website_published', '=', True)]
-                if category_id:
-                    domain.append(('public_categ_ids', 'in', [int(category_id)]))
-                if search:
-                    domain.append(('name', 'ilike', search))
+        return price
 
-                # Determine sort order
-                sort_order = 'id'
-                if sort == 'price_asc':
-                    sort_order = 'list_price asc'
-                elif sort == 'price_desc':
-                    sort_order = 'list_price desc'
-                elif sort == 'name_desc':
-                    sort_order = 'name desc'
+    def _get_image_url(self, product):
+        if product.image_1920:
+            base_url = request.httprequest.host_url.strip('/')
+            return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
+        return ''
 
-                # Search products
-                products = request.env['product.template'].sudo().search(
-                    domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+    @http.route('/api/v1/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+    def list_products(self, **kwargs):
+        try:
+            # Parse query parameters
+            page = int(kwargs.get('page', 1))
+            limit = int(kwargs.get('limit', 20))
+            category_id = kwargs.get('category_id')
+            search = kwargs.get('search')
+            sort = kwargs.get('sort')
+
+            # Build domain for published products
+            domain = [('website_published', '=', True)]
+            if category_id:
+                domain.append(('public_categ_ids', 'in', [int(category_id)]))
+            if search:
+                domain.append(('name', 'ilike', search))
+
+            # Determine sort order
+            sort_order = 'id'
+            if sort == 'price_asc':
+                sort_order = 'list_price asc'
+            elif sort == 'price_desc':
+                sort_order = 'list_price desc'
+            elif sort == 'name_desc':
+                sort_order = 'name desc'
+
+            # Search products
+            products = request.env['product.template'].sudo().search(
+                domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+            )
+
+            # Get current website's pricelist for proper pricing
+            website = request.env['website'].get_current_website()
+            pricelist = website.pricelist_id
+
+            # Prepare response data
+            product_list = []
+            for product in products:
+                # Get price using pricelist rules
+                price, rule = pricelist._get_product_price_rule(
+                    product,
+                    quantity=qty or 1.0,
+                    partner=partner,
+                    date=False,  # or datetime if needed
+                    uom_id=False  # or the uom
                 )
+                product_list.append({
+                    'id': product.id,
+                    'name': product.name,
+                    'price': price,
+                    'description': product.description or '',
+                    'image_url': self._get_image_url(product),
+                    'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                })
 
-                # Get current website's pricelist for proper pricing
-                website = request.env['website'].get_current_website()
-                pricelist = website.pricelist_id
+            total_count = request.env['product.template'].sudo().search_count(domain)
+            total_pages = math.ceil(total_count / limit) if limit else 1
 
-                # Prepare response data
-                product_list = []
-                for product in products:
-                    # Get price using pricelist rules
-                    price = self._get_product_price(product, pricelist)
+            response = {
+                "products": product_list,
+                "total": total_count,
+                "pages": total_pages
+            }
 
-                    product_list.append({
-                        'id': product.id,
-                        'name': product.name,
-                        'price': price,
-                        'description': product.description or '',
-                        'image_url': self._get_image_url(product),
-                        'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
-                    })
+            return Response(json.dumps(response), status=200, content_type='application/json')
 
-                total_count = request.env['product.template'].sudo().search_count(domain)
-                total_pages = math.ceil(total_count / limit) if limit else 1
+        except Exception as e:
+            error = {'error': str(e)}
+            return Response(json.dumps(error), status=500, content_type='application/json')
 
-                response = {
-                    "products": product_list,
-                    "total": total_count,
-                    "pages": total_pages
-                }
+    def _get_product_price(self, product, pricelist):
+        """Get product price considering pricelist rules"""
+        # Use the product's list_price as fallback
+        price = product.list_price
 
-                return Response(json.dumps(response), status=200, content_type='application/json')
-
-            except Exception as e:
-                error = {'error': str(e)}
-                return Response(json.dumps(error), status=500, content_type='application/json')
-
-        def _get_product_price(self, product, pricelist):
-            """Get product price considering pricelist rules"""
-            # Use the product's list_price as fallback
-            price = product.list_price
-
+        try:
+            # Try to get price from pricelist
+            price = pricelist.get_product_price(product, 1, False)
+        except Exception:
+            # If that fails, try a different approach
             try:
-                # Try to get price from pricelist
-                price = pricelist.get_product_price(product, 1, False)
+                product_context = dict(request.env.context)
+                product_context.update({
+                    'pricelist': pricelist.id,
+                    'quantity': 1
+                })
+                product = product.with_context(product_context)
+                price = product.price
             except Exception:
-                # If that fails, try a different approach
-                try:
-                    product_context = dict(request.env.context)
-                    product_context.update({
-                        'pricelist': pricelist.id,
-                        'quantity': 1
-                    })
-                    product = product.with_context(product_context)
-                    price = product.price
-                except Exception:
-                    # Fall back to list_price if all else fails
-                    pass
+                # Fall back to list_price if all else fails
+                pass
 
-            return price
+        return price
 
-        def _get_image_url(self, product):
-            if product.image_1920:
-                base_url = request.httprequest.host_url.strip('/')
-                return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
-            return ''
+    def _get_image_url(self, product):
+        if product.image_1920:
+            base_url = request.httprequest.host_url.strip('/')
+            return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
+        return ''
+
+    @http.route('/api/v2/products', type='http', auth='public', methods=['GET'], csrf=False, cors="*")
+    def list_products(self, **kwargs):
+        try:
+            # Parse query parameters
+            page = int(kwargs.get('page', 1))
+            limit = int(kwargs.get('limit', 20))
+            category_id = kwargs.get('category_id')
+            search = kwargs.get('search')
+            sort = kwargs.get('sort')
+
+            # Build domain for published products
+            domain = [('website_published', '=', True)]
+            if category_id:
+                domain.append(('public_categ_ids', 'in', [int(category_id)]))
+            if search:
+                domain.append(('name', 'ilike', search))
+
+            # Determine sort order
+            sort_order = 'id'
+            if sort == 'price_asc':
+                sort_order = 'list_price asc'
+            elif sort == 'price_desc':
+                sort_order = 'list_price desc'
+            elif sort == 'name_desc':
+                sort_order = 'name desc'
+
+            # Search products
+            products = request.env['product.template'].sudo().search(
+                domain, offset=(page - 1) * limit, limit=limit, order=sort_order
+            )
+
+            # Get current website's pricelist for proper pricing
+            website = request.env['website'].get_current_website()
+            pricelist = website.pricelist_id
+
+            # Prepare response data
+            product_list = []
+            for product in products:
+                # Get price using pricelist rules
+                price = self._get_product_price(product, pricelist)
+
+                product_list.append({
+                    'id': product.id,
+                    'name': product.name,
+                    'price': price,
+                    'description': product.description or '',
+                    'image_url': self._get_image_url(product),
+                    'stock': product.qty_available if hasattr(product, 'qty_available') else 0,
+                })
+
+            total_count = request.env['product.template'].sudo().search_count(domain)
+            total_pages = math.ceil(total_count / limit) if limit else 1
+
+            response = {
+                "products": product_list,
+                "total": total_count,
+                "pages": total_pages
+            }
+
+            return Response(json.dumps(response), status=200, content_type='application/json')
+
+        except Exception as e:
+            error = {'error': str(e)}
+            return Response(json.dumps(error), status=500, content_type='application/json')
+
+    def _get_product_price(self, product, pricelist):
+        """Get product price considering pricelist rules"""
+        # Use the product's list_price as fallback
+        price = product.list_price
+
+        try:
+            # Try to get price from pricelist
+            price = pricelist.get_product_price(product, 1, False)
+        except Exception:
+            # If that fails, try a different approach
+            try:
+                product_context = dict(request.env.context)
+                product_context.update({
+                    'pricelist': pricelist.id,
+                    'quantity': 1
+                })
+                product = product.with_context(product_context)
+                price = product.price
+            except Exception:
+                # Fall back to list_price if all else fails
+                pass
+
+        return price
+
+    def _get_image_url(self, product):
+        if product.image_1920:
+            base_url = request.httprequest.host_url.strip('/')
+            return f"{base_url}/web/image/product.template/{product.id}/image_1920/"
+        return ''
+
