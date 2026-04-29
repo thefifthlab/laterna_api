@@ -18,7 +18,6 @@
     # always loaded
     'data': [
         'security/ir.model.access.csv',
-        'views/nigeria_states.xml',
         'views/mail_template_data.xml',
         'views/onestep_checkout_templates.xml',
         # 'views/product_public_category_views.xml',

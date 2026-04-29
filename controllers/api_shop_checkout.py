@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from odoo import http, _
+from odoo import http, _, fields
 from odoo.http import request
 import logging
 import json
@@ -72,7 +72,7 @@ class ApiShopCheckout(http.Controller):
 
         return {
             "cart": {
-                "order_id": order.id,
+                # "order_id": order.id,
                 "amount_total": order.amount_total,
                 "currency": order.currency_id.name,
                 "lines": [{"product": l.product_id.name, "qty": l.product_uom_qty, "price": l.price_total} for l in
@@ -155,3 +155,81 @@ class ApiShopCheckout(http.Controller):
             "order_name": order.name,
             "payment_url": f"/shop/payment?order_id={order.id}"
         }
+
+    @http.route('/api/v1/confirm_payment', type='json', auth='public', methods=['POST'], csrf=False)
+    def confirm_payment_api(self, **post):
+        """
+        Final hardened API for Odoo 18.
+        Handles: Confirmation, Invoicing, and Conditional Payment Registration.
+        """
+        quotation_name = post.get('quotation_id')
+        payment_ref = post.get('payment_ref')
+        status = post.get('status')
+
+        if not quotation_name:
+            return {'status': 'error', 'message': 'Missing quotation_id'}
+
+        # 1. Locate Record (sudo for bypass)
+        sale_order = request.env['sale.order'].sudo().search([
+            ('name', '=', quotation_name),
+            ('state', 'in', ['draft', 'sent', 'sale'])
+        ], limit=1)
+
+        if not sale_order:
+            return {'status': 'error', 'message': f'Record {quotation_name} not found'}
+
+        try:
+            # 2. Confirm Order if it is still a Quotation
+            if sale_order.state in ['draft', 'sent']:
+                sale_order.action_confirm()
+                _logger.info("Order %s confirmed.", sale_order.name)
+
+            # 3. Create / Post Invoice
+            invoice = sale_order.invoice_ids.filtered(lambda x: x.state != 'cancel')[:1]
+            if not invoice:
+                # This creates invoice for all 'to invoice' lines
+                invoice = sale_order._create_invoices()
+
+            if not invoice:
+                return {'status': 'error', 'message': 'Could not create invoice. Check quantities to invoice.'}
+
+            if invoice.state == 'draft':
+                invoice.action_post()
+
+            # 4. Register Payment (Safety Check for Zero Totals)
+            # This prevents: "You can't register a payment because there is nothing left to pay"
+            if invoice.amount_total > 0 and invoice.amount_residual > 0:
+                journal = request.env['account.journal'].sudo().search([('type', '=', 'bank')], limit=1)
+
+                # Fetch payment method line for Odoo 18
+                payment_method = journal.inbound_payment_method_line_ids.filtered(
+                    lambda l: l.payment_type == 'inbound'
+                )[:1]
+
+                register_pay = request.env['account.payment.register'].sudo().with_context(
+                    active_model='account.move',
+                    active_ids=invoice.ids
+                ).create({
+                    'communication': payment_ref or quotation_name,
+                    'payment_date': fields.Date.today(),
+                    'journal_id': journal.id,
+                    'payment_method_line_id': payment_method.id,
+                    'amount': invoice.amount_residual,
+                })
+                register_pay.action_create_payments()
+                res_state = 'paid'
+            else:
+                # If amount_total is 0, Odoo 18 marks it 'paid' automatically on post.
+                res_state = 'paid_automatically' if invoice.amount_total == 0 else 'already_paid'
+
+            return {
+                'status': 'success',
+                'sale_order': sale_order.name,
+                'invoice': invoice.name,
+                'invoice_total': invoice.amount_total,
+                'payment_state': res_state
+            }
+
+        except Exception as e:
+            _logger.error("API Failure for %s: %s", quotation_name, str(e))
+            return {'status': 'error', 'message': str(e)}
