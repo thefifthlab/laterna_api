@@ -18,29 +18,6 @@ class ApiShopCheckout(http.Controller):
         order = website.sale_get_order(force_create=force_create)
         return order.sudo() if order else None
 
-    def _get_fresh_draft_order(self):
-        """
-        Always return a clean draft sales order.
-        If the current cart order is already confirmed/locked, force-create
-        a brand new one so we never attempt to unlink lines on a confirmed order.
-        """
-        order = self._get_order(force_create=True)
-        if not order:
-            raise UserError("Could not create or retrieve a sales order.")
-
-        if order.state not in ('draft', 'sent'):
-            # Current session order is confirmed — open a fresh one
-            website = self._get_current_website()
-            # Clear the session cart so sale_get_order creates a new record
-            request.session.pop('sale_order_id', None)
-            request.session.pop('website_sale_current_pl', None)
-            order = website.sale_get_order(force_create=True)
-            if not order:
-                raise UserError("Could not create a new sales order.")
-            order = order.sudo()
-
-        return order
-
     def _get_product_detail(self, product_id):
         """Get basic product info"""
         product = request.env['product.product'].sudo().browse(product_id)
@@ -52,37 +29,6 @@ class ApiShopCheckout(http.Controller):
 
     def _json_error_response(self, message, code=400):
         return {"status": "error", "message": message, "code": code}
-
-    def _get_invoicing_env(self, company):
-        """
-        Return an env scoped to a real internal user who belongs to the
-        Invoicing / Invoicing group and the given company.
-        Falls back to base.user_admin if no dedicated invoicing user is found.
-        This is required because account.payment write operations enforce
-        group membership and will reject sudo() calls made as the public user.
-        """
-        invoice_group = request.env.ref('account.group_account_invoice', raise_if_not_found=False)
-
-        if invoice_group:
-            invoice_user = request.env['res.users'].sudo().search([
-                ('groups_id', 'in', invoice_group.id),
-                ('company_ids', 'in', company.id),
-                ('active', '=', True),
-                ('share', '=', False),  # internal users only
-            ], limit=1)
-
-            if invoice_user:
-                _logger.info("Using invoicing user '%s' (id=%s) for payment registration",
-                             invoice_user.name, invoice_user.id)
-                return request.env(user=invoice_user.id)
-
-        # Fallback to admin
-        _logger.warning(
-            "No invoicing user found for company '%s'. Falling back to base.user_admin.",
-            company.name
-        )
-        admin_user = request.env.ref('base.user_admin')
-        return request.env(user=admin_user.id)
 
     # ====================== ONE-STEP CHECKOUT CONFIRM ======================
     @http.route('/api/v1/shop/order/confirm', type='json', auth='public',
@@ -97,16 +43,12 @@ class ApiShopCheckout(http.Controller):
 
         try:
             with request.env.cr.savepoint():
-                sale_order = self._get_fresh_draft_order()
+                sale_order = self._get_order(force_create=True)
+                if not sale_order:
+                    raise UserError("Could not create or retrieve sales order")
 
                 # ====================== Add Products ======================
-                # Safe line removal — only unlink on draft orders.
-                # Confirmed orders reject unlink(), so we zero-out qty as fallback.
-                for line in sale_order.order_line:
-                    try:
-                        line.unlink()
-                    except Exception:
-                        line.sudo().write({'product_uom_qty': 0})
+                sale_order.sudo().order_line.unlink()
 
                 order_lines = []
                 for item in products:
@@ -155,6 +97,7 @@ class ApiShopCheckout(http.Controller):
                         carrier = request.env['delivery.carrier'].sudo().browse(int(data['carrier_id']))
                         if carrier.exists():
                             sale_order.sudo().write({'carrier_id': carrier.id})
+                            # Correct method in Odoo 18
                             sale_order.sudo()._compute_delivery_price()
                             _logger.info("Carrier applied: %s | Delivery Price: %s",
                                         carrier.name, sale_order.delivery_price)
@@ -186,22 +129,14 @@ class ApiShopCheckout(http.Controller):
                 ], limit=1)
 
                 if not payment_method_line:
-                    return self._json_error_response(
-                        f"No inbound '{journal_type}' payment method found.", 500
-                    )
+                    return self._json_error_response(f"No inbound '{journal_type}' payment method found.", 500)
 
                 unpaid_invoices = invoices.filtered(
                     lambda inv: inv.state == 'posted' and inv.payment_state not in ('paid', 'in_payment')
                 )
 
                 if unpaid_invoices:
-                    # Use a real internal invoicing user to satisfy account.payment group ACL.
-                    # sudo() alone is not sufficient here because Odoo 16/17/18 enforces
-                    # group_account_invoice membership on account.payment write operations
-                    # regardless of sudo context when the original user is 'public'.
-                    invoicing_env = self._get_invoicing_env(company)
-
-                    payment_register = invoicing_env['account.payment.register'].with_company(company).with_context(
+                    payment_register = request.env['account.payment.register'].sudo().with_company(company).with_context(
                         active_model='account.move',
                         active_ids=unpaid_invoices.ids,
                     ).create({
@@ -213,62 +148,32 @@ class ApiShopCheckout(http.Controller):
                     payment_register.action_create_payments()
 
                     # ====================== Reconcile Payments ======================
-                    # Flush all pending ORM writes to the DB so the payment move lines
-                    # are visible in the same transaction before we reconcile.
-                    request.env.cr.flush()
-
+                    # Force reconciliation so payment_state moves from 'in_payment' → 'paid'
                     for invoice in unpaid_invoices:
-                        # Invalidate cache so we re-read fresh state from DB
-                        invoice.invalidate_recordset()
-
-                        if invoice.payment_state in ('paid', 'in_payment'):
-                            # Try the built-in reconcile helper first (Odoo 16/17/18)
-                            if hasattr(invoice, '_reconcile_plan'):
-                                try:
-                                    invoice.sudo()._reconcile_plan()
-                                    invoice.invalidate_recordset()
-                                    if invoice.payment_state == 'paid':
-                                        continue
-                                except Exception as e:
-                                    _logger.warning("_reconcile_plan failed: %s", e)
-
-                        # Manual reconciliation fallback
-                        receivable_lines = invoice.line_ids.filtered(
+                        receivable_accounts = invoice.line_ids.filtered(
                             lambda l: l.account_id.account_type in ('asset_receivable', 'liability_payable')
-                                      and not l.reconciled
                         )
-                        if not receivable_lines:
+                        if not receivable_accounts:
                             continue
 
-                        account_id = receivable_lines[:1].account_id.id
-                        partner_id = invoice.partner_id.commercial_partner_id.id
+                        account_id = receivable_accounts[:1].account_id.id
 
-                        # Find unreconciled payment lines posted AFTER the invoice
-                        # was confirmed — scoped tightly to avoid touching other invoices.
-                        payment_move_lines = request.env['account.move.line'].sudo().search([
+                        payment_lines = request.env['account.move.line'].sudo().search([
                             ('move_id.move_type', '=', 'entry'),
-                            ('move_id.state', '=', 'posted'),
                             ('account_id', '=', account_id),
-                            ('partner_id', '=', partner_id),
                             ('reconciled', '=', False),
+                            ('partner_id', '=', invoice.partner_id.commercial_partner_id.id),
                             ('amount_residual', '!=', 0),
                         ])
 
-                        if payment_move_lines and receivable_lines:
-                            try:
-                                (payment_move_lines | receivable_lines).sudo().reconcile()
-                            except Exception as rec_err:
-                                _logger.warning("Reconciliation failed for invoice %s: %s",
-                                                invoice.name, rec_err)
+                        invoice_lines = invoice.line_ids.filtered(
+                            lambda l: l.account_id.id == account_id and not l.reconciled
+                        )
 
-                        # Final invalidate so response reflects reconciled state
-                        invoice.invalidate_recordset()
+                        if payment_lines and invoice_lines:
+                            (payment_lines | invoice_lines).sudo().reconcile()
 
                 # ====================== Build Response ======================
-                # Invalidate invoice cache one final time so payment_state
-                # reflects the reconciled state written above.
-                invoices.invalidate_recordset()
-
                 items = [{
                     'line_id': line.id,
                     'product_id': line.product_id.id,
@@ -306,7 +211,7 @@ class ApiShopCheckout(http.Controller):
                     "invoices": invoice_data,
                 }
 
-                _logger.info("✅ Checkout successful - Order: %s | Invoices: %s",
+                _logger.info("? Checkout successful - Order: %s | Invoices: %s",
                              sale_order.name,
                              [(inv.get("invoice_reference"), inv.get("payment_state")) for inv in invoice_data])
 
